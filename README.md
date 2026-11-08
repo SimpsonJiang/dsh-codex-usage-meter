@@ -3,6 +3,8 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > **这是一个 Codex-style 的用量统计插件。** 界面布局、6 张 KPI 卡、活动热力图 / 柱状图、悬浮气泡和页脚注脚都参考 **OpenAI Codex 官方用量统计界面**，再针对 DeepSeek Harness 与 DeepSeek 峰谷计价做适配。本项目与 OpenAI / Codex 无隶属关系，也不包含其任何代码。
+>
+> **This usage meter is Codex-style**: its layout, KPI cards, activity heatmap / cell bars, hover tooltips and footer note follow the **OpenAI Codex usage dashboard**, adapted for DeepSeek Harness and DeepSeek peak/off-peak pricing. Not affiliated with OpenAI; no Codex code is included.
 
 DeepSeek Harness 插件：统计 provider 上报的 Token 用量，按 DeepSeek **峰时 / 谷时（peak / off-peak）** 价格计费，提供两个界面：
 
