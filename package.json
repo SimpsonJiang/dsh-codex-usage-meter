@@ -6,11 +6,11 @@
   "description": "DeepSeek token usage and cost meter: a current-Session status bar plus a Codex-style global usage statistics page, priced with DeepSeek peak/off-peak rates.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/SimpsonJiang/dsh-usage-meter.git"
+    "url": "git+https://github.com/SimpsonJiang/dsh-codex-usage-meter.git"
   },
-  "homepage": "https://github.com/SimpsonJiang/dsh-usage-meter#readme",
+  "homepage": "https://github.com/SimpsonJiang/dsh-codex-usage-meter#readme",
   "bugs": {
-    "url": "https://github.com/SimpsonJiang/dsh-usage-meter/issues"
+    "url": "https://github.com/SimpsonJiang/dsh-codex-usage-meter/issues"
   },
   "keywords": [
     "deepseek-harness",

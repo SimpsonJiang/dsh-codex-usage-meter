@@ -1,4 +1,4 @@
-# dsh-usage-meter · Codex-style DSH 用量统计
+# dsh-codex-usage-meter · Codex-style DSH 用量统计
 
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -82,8 +82,9 @@ DeepSeek 官方列表价（元 / 百万 token，价格页更新于 2026-09-10）
 
 ## 仓库
 
-- 源码：<https://github.com/SimpsonJiang/dsh-usage-meter>
-- 问题反馈：<https://github.com/SimpsonJiang/dsh-usage-meter/issues>
+- 源码：<https://github.com/SimpsonJiang/dsh-codex-usage-meter>
+- 问题反馈：<https://github.com/SimpsonJiang/dsh-codex-usage-meter/issues>
+- 仓库名改为 `dsh-codex-usage-meter`；DSH 插件 id / 包名仍是 `@local/dsh-usage-meter`，bundle 名不变，老仓库链接由 GitHub 自动重定向。
 
 ## License
 
