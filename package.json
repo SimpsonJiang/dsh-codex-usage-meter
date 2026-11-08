@@ -1,0 +1,55 @@
+{
+  "name": "@local/dsh-usage-meter",
+  "version": "1.5.1",
+  "private": false,
+  "license": "MIT",
+  "description": "DeepSeek token usage and cost meter: a current-Session status bar plus a Codex-style global usage statistics page, priced with DeepSeek peak/off-peak rates.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SimpsonJiang/dsh-usage-meter.git"
+  },
+  "homepage": "https://github.com/SimpsonJiang/dsh-usage-meter#readme",
+  "bugs": {
+    "url": "https://github.com/SimpsonJiang/dsh-usage-meter/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "token-usage",
+    "cost-tracking",
+    "codex-style"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-session"
+      ]
+    }
+  }
+}

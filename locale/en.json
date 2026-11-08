@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Token usage meter",
+    "description": "A current-Session cost reading in the status bar plus a Codex-style usage statistics page, priced with DeepSeek peak and off-peak rates."
+  }
+}

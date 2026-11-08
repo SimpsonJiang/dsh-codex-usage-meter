@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Token 用量计费",
+    "description": "状态栏显示当前会话的 Token 费用，并提供 Codex 风格的用量统计页，按 DeepSeek 峰时 / 谷时价格计费。"
+  }
+}

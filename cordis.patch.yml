@@ -1,0 +1,6 @@
+# Bundle patch: one Host row. The `dsh.client` declaration in package.json
+# makes the Web app load ./client.js as the browser half, which owns the
+# status-bar rendering.
+- insert:
+    - id: dsh-usage-meter
+      name: '@local/dsh-usage-meter'
