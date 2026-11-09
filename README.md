@@ -16,6 +16,16 @@ DeepSeek Harness 插件：统计 provider 上报的 Token 用量，按 DeepSeek 
 
 计费与统计都不产生模型请求、不联网：Host 半只折叠 Session 日志里已经提交的 `assistant/message` / `assistant/attempt` 结算，以及 `turn/start` → `turn/end` 边界。
 
+## 预览 / Screenshots
+
+**用量统计页（Codex-style）**——6 张 KPI 卡、Token 活动热力图（每天 / 每周柱状图 / 累计总量）、按模型拆分：
+
+![用量统计页](assets/screenshot-stats-page.png)
+
+**底部状态栏**——只显示当前 Session 的费用拆分：总花费 / 输入（缓存命中）/ 输入（缓存未命中）/ 输出：
+
+![底部状态栏](assets/screenshot-status-bar.png)
+
 ## 价格与峰谷规则
 
 DeepSeek 官方列表价（元 / 百万 token，价格页更新于 2026-09-10）：
@@ -74,6 +84,8 @@ DeepSeek 官方列表价（元 / 百万 token，价格页更新于 2026-09-10）
 | `client.js` | 浏览器半：状态栏（当前会话 + 点击跳转）、侧栏入口与「用量统计」页、zh/en 文案、主题 token 样式 |
 | `cordis.patch.yml` | 插入 Host 插件行 |
 | `locale/*.json` | 插件管理器的标题 / 描述 |
+| `assets/*.png` | 商店卡片图标（`icon-180.png`）与 README 预览截图 |
+| `screenshots.json` | 市场详情页的截图清单（仓库内相对路径） |
 | `tests/host.test.mjs` / `tests/client.test.mjs` | Host 21 项、客户端渲染与交互断言 |
 
 ## 安装
