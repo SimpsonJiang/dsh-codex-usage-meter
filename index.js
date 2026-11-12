@@ -454,7 +454,7 @@ export function createState() {
     sessions: {},
     slots: {},
     last: null,
-    aux: { requests: 0, cost: 0, tokens: 0, byPurpose: {} },
+    aux: { requests: 0, cost: 0, tokens: 0, byPurpose: {}, byPurposeRequests: {}, byPurposeTokens: {}, log: [] },
     backfill: { state: 'pending' },
     sessionReconcile: { state: 'pending' },
   }
@@ -634,11 +634,45 @@ export function sanitizeState(raw) {
         byPurpose[purpose] = nonNegative(cost) ?? 0
       }
     }
+    const byPurposeRequests = {}
+    if (isRecord(raw.aux.byPurposeRequests)) {
+      for (const [purpose, count] of Object.entries(raw.aux.byPurposeRequests)) {
+        if (typeof purpose !== 'string' || purpose === '' || purpose.length > 80) continue
+        byPurposeRequests[purpose] = Math.max(0, Math.floor(finiteNumber(count) ?? 0))
+      }
+    }
+    const byPurposeTokens = {}
+    if (isRecord(raw.aux.byPurposeTokens)) {
+      for (const [purpose, tokens] of Object.entries(raw.aux.byPurposeTokens)) {
+        if (typeof purpose !== 'string' || purpose === '' || purpose.length > 80) continue
+        byPurposeTokens[purpose] = Math.max(0, Math.floor(finiteNumber(tokens) ?? 0))
+      }
+    }
+    const log = []
+    if (Array.isArray(raw.aux.log)) {
+      for (const entry of raw.aux.log.slice(-25)) {
+        if (!isRecord(entry) || typeof entry.purpose !== 'string') continue
+        log.push({
+          time: finiteNumber(entry.time) ?? 0,
+          purpose: entry.purpose.slice(0, 80),
+          sessionId: typeof entry.sessionId === 'string' ? entry.sessionId : '',
+          provider: typeof entry.provider === 'string' ? entry.provider : '',
+          model: typeof entry.model === 'string' ? entry.model : '',
+          inputTokens: Math.max(0, Math.floor(finiteNumber(entry.inputTokens) ?? 0)),
+          cacheReadTokens: Math.max(0, Math.floor(finiteNumber(entry.cacheReadTokens) ?? 0)),
+          outputTokens: Math.max(0, Math.floor(finiteNumber(entry.outputTokens) ?? 0)),
+          cost: nonNegative(entry.cost) ?? 0,
+        })
+      }
+    }
     state.aux = {
       requests: Math.max(0, Math.floor(finiteNumber(raw.aux.requests) ?? 0)),
       cost: nonNegative(raw.aux.cost) ?? 0,
       tokens: Math.max(0, Math.floor(finiteNumber(raw.aux.tokens) ?? 0)),
       byPurpose,
+      byPurposeRequests,
+      byPurposeTokens,
+      log,
     }
   }
   return state
@@ -699,6 +733,18 @@ export function serializeState(state) {
         Object.entries(isRecord(state.aux?.byPurpose) ? state.aux.byPurpose : {})
           .map(([purpose, cost]) => [purpose, truncateCost(cost)]),
       ),
+      byPurposeRequests: Object.fromEntries(
+        Object.entries(isRecord(state.aux?.byPurposeRequests) ? state.aux.byPurposeRequests : {})
+          .map(([purpose, count]) => [purpose, Math.max(0, Math.floor(finiteNumber(count) ?? 0))]),
+      ),
+      byPurposeTokens: Object.fromEntries(
+        Object.entries(isRecord(state.aux?.byPurposeTokens) ? state.aux.byPurposeTokens : {})
+          .map(([purpose, tokens]) => [purpose, Math.max(0, Math.floor(finiteNumber(tokens) ?? 0))]),
+      ),
+      log: Array.isArray(state.aux?.log) ? state.aux.log.slice(-25).map((entry) => ({
+        ...entry,
+        cost: truncateCost(entry.cost),
+      })) : [],
     },
   })
 }
@@ -1079,6 +1125,25 @@ export function buildStats(state, config, now) {
         Object.entries(isRecord(state.aux?.byPurpose) ? state.aux.byPurpose : {})
           .map(([purpose, cost]) => [purpose, truncateCost(cost)]),
       ),
+      byPurposeRequests: Object.fromEntries(
+        Object.entries(isRecord(state.aux?.byPurposeRequests) ? state.aux.byPurposeRequests : {})
+          .map(([purpose, count]) => [purpose, Math.max(0, Math.floor(finiteNumber(count) ?? 0))]),
+      ),
+      byPurposeTokens: Object.fromEntries(
+        Object.entries(isRecord(state.aux?.byPurposeTokens) ? state.aux.byPurposeTokens : {})
+          .map(([purpose, tokens]) => [purpose, Math.max(0, Math.floor(finiteNumber(tokens) ?? 0))]),
+      ),
+      recent: Array.isArray(state.aux?.log) ? state.aux.log.slice(-25).map((entry) => ({
+        time: entry.time,
+        purpose: entry.purpose,
+        sessionId: entry.sessionId,
+        provider: entry.provider,
+        model: entry.model,
+        inputTokens: entry.inputTokens,
+        cacheReadTokens: entry.cacheReadTokens,
+        outputTokens: entry.outputTokens,
+        cost: truncateCost(entry.cost),
+      })) : [],
     },
     pricing: {
       currency: 'CNY',
@@ -1489,12 +1554,29 @@ export function apply(ctx, rawConfig) {
     if (tokens <= 0) return
     const contribution = makeContribution({ usage, provider, model, time, config })
     applyContribution(contribution, 1, sessionId)
-    state.aux = isRecord(state.aux) ? state.aux : { requests: 0, cost: 0, tokens: 0, byPurpose: {} }
+    state.aux = isRecord(state.aux) ? state.aux : { requests: 0, cost: 0, tokens: 0, byPurpose: {}, byPurposeRequests: {}, byPurposeTokens: {}, log: [] }
     state.aux.requests = (Math.max(0, Math.floor(finiteNumber(state.aux.requests) ?? 0)) + 1)
     state.aux.cost = (nonNegative(state.aux.cost) ?? 0) + contribution.cost
     state.aux.tokens = (Math.max(0, Math.floor(finiteNumber(state.aux.tokens) ?? 0)) + tokens)
     if (!isRecord(state.aux.byPurpose)) state.aux.byPurpose = {}
     state.aux.byPurpose[purpose] = (nonNegative(state.aux.byPurpose[purpose]) ?? 0) + contribution.cost
+    if (!isRecord(state.aux.byPurposeRequests)) state.aux.byPurposeRequests = {}
+    state.aux.byPurposeRequests[purpose] = (Math.max(0, Math.floor(finiteNumber(state.aux.byPurposeRequests[purpose]) ?? 0)) + 1)
+    if (!isRecord(state.aux.byPurposeTokens)) state.aux.byPurposeTokens = {}
+    state.aux.byPurposeTokens[purpose] = (Math.max(0, Math.floor(finiteNumber(state.aux.byPurposeTokens[purpose]) ?? 0)) + tokens)
+    if (!Array.isArray(state.aux.log)) state.aux.log = []
+    state.aux.log.push({
+      time,
+      purpose,
+      sessionId: sessionId ?? '',
+      provider: contribution.provider,
+      model: contribution.model,
+      inputTokens: usage.inputTokens,
+      cacheReadTokens: usage.cacheReadTokens,
+      outputTokens: usage.outputTokens,
+      cost: contribution.cost,
+    })
+    if (state.aux.log.length > 25) state.aux.log.splice(0, state.aux.log.length - 25)
     state.revision += 1
     state.updatedAt = Date.now()
     markDirty()
