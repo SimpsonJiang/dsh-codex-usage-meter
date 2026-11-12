@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Node test for the usage-meter Host half. Runs the real plugin entry against a
  * fake Cordis context: exercises pricing, the session-event fold (replacement,
  * retry and turn-duration semantics), per-Session totals, the KPIs, both JSON
@@ -201,8 +201,9 @@ function turnEvent(type, { turn, time, seq = 1 }) {
 }
 
 /** Rate in CNY per 1M input tokens at one instant, under the current defaults. */
-function flashInputRate(time) {
-  return isPeak(time, resolveConfig({})) ? 2 : 1
+function flashInputRate(_time) {
+  // The shipped price book is `flat`: every call is billed at the 空闲 rate.
+  return resolveConfig({}).models['deepseek-flash'].off.cacheMiss
 }
 
 // ---------------------------------------------------------------------------
@@ -292,10 +293,17 @@ await test('the session fold splits cost into cache-hit, cache-miss and output',
     }),
   ]
   const folded = foldSessionTotals(events, 0, config, at + 1)
-  assert.equal(folded.cacheHitCost, 2 * 0.04)
-  assert.equal(folded.cacheMissCost, 1 * 2)
-  assert.equal(folded.outputCost, 3 * 8)
-  assert.equal(folded.cost, 0.08 + 2 + 24)
+  // Default `flat` pricing: the off-peak column applies even inside the window.
+  assert.equal(folded.cacheHitCost, 2 * 0.02)
+  assert.equal(folded.cacheMissCost, 1 * 1)
+  assert.equal(folded.outputCost, 3 * 4)
+  assert.equal(folded.cost, 0.04 + 1 + 12)
+  // `scheduled` opts back into the published peak windows.
+  const scheduled = foldSessionTotals(events, 0, resolveConfig({ pricingMode: 'scheduled' }), at + 1)
+  assert.equal(scheduled.cacheHitCost, 2 * 0.04)
+  assert.equal(scheduled.cacheMissCost, 1 * 2)
+  assert.equal(scheduled.outputCost, 3 * 8)
+  assert.equal(scheduled.cost, 0.08 + 2 + 24)
   // Events at or after the live cutoff are excluded.
   const withoutMessage = foldSessionTotals(events, 0, config, at)
   assert.equal(withoutMessage.cost, 0)
@@ -325,6 +333,27 @@ await test('money is truncated to cents, never rounded', () => {
   assert.equal(disk.sessions.s1.cost, 26.08)
   assert.equal(disk.sessions.s1.cacheHitCost, 25.99)
   assert.equal(disk.days['2026-11-08'].cost, 1.23)
+})
+
+await test('flat pricing (the default) charges the off-peak price at every hour', async () => {
+  await useFreshProfile()
+  const at = peakTime(2026, 11, 9, 10, 0) // inside the published weekday peak window
+  const flat = await mount({}, { backfill: false })
+  flat.emit({ id: 'session-flat' }, requestHeaderEvent({ time: at }))
+  flat.emit({ id: 'session-flat' }, messageEvent({ turn: 1, step: 1, time: at, usage: { inputTokens: 2_000_000, outputTokens: 0 } }))
+  const flatSummary = flat.summary()
+  assert.equal(flatSummary.total.cost, 2, 'off-peak miss price (1 CNY/M) applies at peak hours')
+  assert.equal(flatSummary.period.kind, 'off')
+  assert.equal(flatSummary.period.pricingMode, 'flat')
+
+  await useFreshProfile()
+  const scheduled = await mount({}, { backfill: false, pricingMode: 'scheduled' })
+  scheduled.emit({ id: 'session-scheduled' }, requestHeaderEvent({ time: at }))
+  scheduled.emit({ id: 'session-scheduled' }, messageEvent({ turn: 1, step: 1, time: at, usage: { inputTokens: 2_000_000, outputTokens: 0 } }))
+  const scheduledSummary = scheduled.summary()
+  assert.equal(scheduledSummary.total.cost, 4, 'scheduled mode charges the peak price inside the window')
+  assert.equal(scheduledSummary.period.kind, 'peak')
+  assert.equal(scheduledSummary.period.pricingMode, 'scheduled')
 })
 
 await test('config can add models, derives the missing side, and aliases retired ids', () => {
@@ -477,7 +506,7 @@ await test('folds usage, replaces a step settlement, and bills retries separatel
   let payload = summary()
   assert.equal(payload.total.requests, 1)
   assert.equal(payload.total.cost, 2 * inputRate + outputRate)
-  assert.equal(payload.last.peak, isPeak(at, resolveConfig({})))
+  assert.equal(payload.last.peak, false, 'flat pricing never labels a call peak')
 
   emit({ id: 'session-1' }, attemptEvent({ turn: 2, step: 1, time: at, usage: { inputTokens: 1_000_000, outputTokens: 0 }, seq: 4 }))
   emit({ id: 'session-1' }, { type: 'llm/retry-started', seq: 5, time: at, data: { turn: 2, step: 1, retry: 1, retryId: 'r1' } })

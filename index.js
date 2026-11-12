@@ -269,6 +269,7 @@ function pricingSignature(config) {
     models: Object.fromEntries(Object.entries(config.models).sort(([left], [right]) => left.localeCompare(right))),
     aliases: Object.fromEntries(Object.entries(config.aliases).sort(([left], [right]) => left.localeCompare(right))),
     fallbackModel: config.fallbackModel,
+    pricingMode: config.pricingMode,
     peakDays: config.peakDays,
     peakWindows: config.peakWindows,
     holidays: [...config.holidays].sort(),
@@ -302,12 +303,14 @@ export function resolveConfig(raw) {
     ? input.holidays.filter((entry) => typeof entry === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry))
     : []
   const peakDaysInput = typeof input.peakDays === 'string' ? input.peakDays.trim().toLowerCase() : ''
+  const pricingModeInput = typeof input.pricingMode === 'string' ? input.pricingMode.trim().toLowerCase() : ''
   return {
     models,
     aliases,
     fallbackModel,
     holidays,
     holidaySet: new Set(holidays),
+    pricingMode: pricingModeInput === 'scheduled' ? 'scheduled' : 'flat',
     peakDays: peakDaysInput === 'weekdays' || peakDaysInput === 'workdays' ? 'weekdays' : 'daily',
     peakWindows: parsePeakWindows(input.peakWindows),
     retainDays: clampInteger(input.retainDays, 400, HISTORY_DAYS, 3_660),
@@ -357,7 +360,9 @@ export function costOf(usage, rates) {
 /** Build one immutable contribution from a settlement event. */
 function makeContribution({ usage, provider, model, time, config }) {
   const resolved = resolvePrice(config, model)
-  const peak = isPeak(time, config)
+  // `flat` matches the platform bill: every call is charged the 空闲 price. The
+  // published peak windows are opt-in through `pricingMode: scheduled`.
+  const peak = config.pricingMode === 'scheduled' && isPeak(time, config)
   const rates = resolved === undefined ? undefined : peak ? resolved.price.peak : resolved.price.off
   const costParts = rates === undefined ? { cacheHit: 0, cacheMiss: 0, output: 0 } : {
     cacheHit: (usage.cacheReadTokens * rates.cacheHit) / 1_000_000,
@@ -979,7 +984,8 @@ function presentBackfill(state) {
 
 /** Build the status-bar payload. */
 export function buildSnapshot(state, config, now, sessionId) {
-  const peak = isPeak(now, config)
+  const scheduled = config.pricingMode === 'scheduled'
+  const peak = scheduled && isPeak(now, config)
   const dayKey = localDateKey(now)
   const snapshot = {
     ok: true,
@@ -989,8 +995,9 @@ export function buildSnapshot(state, config, now, sessionId) {
     timezone: 'Asia/Shanghai',
     period: {
       kind: peak ? 'peak' : 'off',
-      nextChangeAt: nextPeriodChange(now, config),
-      windows: config.peakWindows.map(([start, end]) => `${clockLabel(start)}-${clockLabel(end)}`),
+      pricingMode: config.pricingMode,
+      nextChangeAt: scheduled ? nextPeriodChange(now, config) : null,
+      windows: scheduled ? config.peakWindows.map(([start, end]) => `${clockLabel(start)}-${clockLabel(end)}`) : [],
       peakDays: config.peakDays,
       holidayCount: config.holidays.length,
     },
