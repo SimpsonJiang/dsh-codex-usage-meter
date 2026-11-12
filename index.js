@@ -39,11 +39,9 @@ const DAY_MS = 86_400_000
 /** China Standard Time is UTC+8 all year, so the peak window needs no tz database. */
 const BEIJING_OFFSET_MS = 8 * 3_600_000
 /**
- * DeepSeek peak windows in Beijing time, in minutes from midnight. The
- * published rule restricts them to Monday–Friday, but the account bill on
- * 2026-11-08 (a Sunday) charged the 14:00–18:00 window at the peak rate, so
- * `peakDays` defaults to `daily`; set `peakDays: weekdays` for the documented
- * calendar.
+ * DeepSeek peak windows in Beijing time, in minutes from midnight.
+ * `peakDays` defaults to `weekdays` (the documented Monday–Friday calendar);
+ * set `peakDays: daily` only if the account bills weekends at the peak rate.
  */
 const DEFAULT_PEAK_WINDOWS = [
   [9 * 60, 12 * 60],
@@ -310,8 +308,8 @@ export function resolveConfig(raw) {
     fallbackModel,
     holidays,
     holidaySet: new Set(holidays),
-    pricingMode: pricingModeInput === 'scheduled' ? 'scheduled' : 'flat',
-    peakDays: peakDaysInput === 'weekdays' || peakDaysInput === 'workdays' ? 'weekdays' : 'daily',
+    pricingMode: pricingModeInput === 'flat' ? 'flat' : 'scheduled',
+    peakDays: peakDaysInput === 'daily' ? 'daily' : 'weekdays',
     peakWindows: parsePeakWindows(input.peakWindows),
     retainDays: clampInteger(input.retainDays, 400, HISTORY_DAYS, 3_660),
     flushMs: clampInteger(input.flushMs, 2_000, 250, 60_000),
@@ -360,8 +358,8 @@ export function costOf(usage, rates) {
 /** Build one immutable contribution from a settlement event. */
 function makeContribution({ usage, provider, model, time, config }) {
   const resolved = resolvePrice(config, model)
-  // `flat` matches the platform bill: every call is charged the 空闲 price. The
-  // published peak windows are opt-in through `pricingMode: scheduled`.
+  // `scheduled` (default) follows the published peak windows; `flat` charges
+  // the 空闲 price at every hour for accounts that never see the peak price.
   const peak = config.pricingMode === 'scheduled' && isPeak(time, config)
   const rates = resolved === undefined ? undefined : peak ? resolved.price.peak : resolved.price.off
   const costParts = rates === undefined ? { cacheHit: 0, cacheMiss: 0, output: 0 } : {

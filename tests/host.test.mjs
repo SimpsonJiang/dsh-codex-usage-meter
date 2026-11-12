@@ -201,9 +201,9 @@ function turnEvent(type, { turn, time, seq = 1 }) {
 }
 
 /** Rate in CNY per 1M input tokens at one instant, under the current defaults. */
-function flashInputRate(_time) {
-  // The shipped price book is `flat`: every call is billed at the 空闲 rate.
-  return resolveConfig({}).models['deepseek-flash'].off.cacheMiss
+function flashInputRate(time) {
+  const config = resolveConfig({})
+  return isPeak(time, config) ? config.models['deepseek-flash'].peak.cacheMiss : config.models['deepseek-flash'].off.cacheMiss
 }
 
 // ---------------------------------------------------------------------------
@@ -211,9 +211,9 @@ function flashInputRate(_time) {
 // ---------------------------------------------------------------------------
 
 await test('peak windows follow the configured Beijing schedule', () => {
-  // The default matches the observed account bill: windows apply every day.
   const config = resolveConfig({})
-  assert.equal(config.peakDays, 'daily')
+  assert.equal(config.pricingMode, 'scheduled')
+  assert.equal(config.peakDays, 'weekdays')
   assert.deepEqual(config.peakWindows, [[540, 720], [840, 1080]])
   assert.equal(isPeak(peakTime(2026, 11, 9, 9, 0), config), true)
   assert.equal(isPeak(peakTime(2026, 11, 9, 11, 59), config), true)
@@ -222,16 +222,15 @@ await test('peak windows follow the configured Beijing schedule', () => {
   assert.equal(isPeak(peakTime(2026, 11, 9, 14, 0), config), true)
   assert.equal(isPeak(peakTime(2026, 11, 9, 17, 59), config), true)
   assert.equal(isPeak(peakTime(2026, 11, 9, 18, 0), config), false)
-  // 2026-11-14 is a Saturday and 2026-11-15 a Sunday.
-  assert.equal(isPeak(peakTime(2026, 11, 14, 10, 0), config), true)
-  assert.equal(isPeak(peakTime(2026, 11, 15, 15, 0), config), true)
+  // 2026-11-14 is a Saturday and 2026-11-15 a Sunday: off-peak by default.
+  assert.equal(isPeak(peakTime(2026, 11, 14, 10, 0), config), false)
+  assert.equal(isPeak(peakTime(2026, 11, 15, 15, 0), config), false)
 
-  // The documented weekday-only calendar stays available as a configuration.
-  const documented = resolveConfig({ peakDays: 'weekdays' })
-  assert.equal(documented.peakDays, 'weekdays')
-  assert.equal(isPeak(peakTime(2026, 11, 14, 10, 0), documented), false)
-  assert.equal(isPeak(peakTime(2026, 11, 15, 15, 0), documented), false)
-  assert.equal(isPeak(peakTime(2026, 11, 9, 10, 0), documented), true)
+  // `peakDays: daily` bills weekends inside the windows too.
+  const daily = resolveConfig({ peakDays: 'daily' })
+  assert.equal(daily.peakDays, 'daily')
+  assert.equal(isPeak(peakTime(2026, 11, 14, 10, 0), daily), true)
+  assert.equal(isPeak(peakTime(2026, 11, 15, 15, 0), daily), true)
 
   // Custom windows are parsed from `HH:MM-HH:MM` strings.
   const custom = resolveConfig({ peakWindows: ['10:30-11:15'] })
@@ -247,16 +246,20 @@ await test('configured holidays are billed off-peak', () => {
 })
 
 await test('next period change follows the configured schedule', () => {
-  const daily = resolveConfig({})
-  assert.equal(nextPeriodChange(peakTime(2026, 11, 9, 8, 30), daily), peakTime(2026, 11, 9, 9, 0))
-  assert.equal(nextPeriodChange(peakTime(2026, 11, 9, 10, 0), daily), peakTime(2026, 11, 9, 12, 0))
-  assert.equal(nextPeriodChange(peakTime(2026, 11, 9, 12, 30), daily), peakTime(2026, 11, 9, 14, 0))
+  const weekly = resolveConfig({})
+  assert.equal(nextPeriodChange(peakTime(2026, 11, 9, 8, 30), weekly), peakTime(2026, 11, 9, 9, 0))
+  assert.equal(nextPeriodChange(peakTime(2026, 11, 9, 10, 0), weekly), peakTime(2026, 11, 9, 12, 0))
+  assert.equal(nextPeriodChange(peakTime(2026, 11, 9, 12, 30), weekly), peakTime(2026, 11, 9, 14, 0))
+  // Weekday-only windows: Friday 18:30 is followed by Monday 09:00.
+  assert.equal(nextPeriodChange(peakTime(2026, 11, 13, 18, 30), weekly), peakTime(2026, 11, 16, 9, 0))
+
   // Every-day windows: Friday 18:30 is followed by Saturday 09:00.
+  const daily = resolveConfig({ peakDays: 'daily' })
   assert.equal(nextPeriodChange(peakTime(2026, 11, 13, 18, 30), daily), peakTime(2026, 11, 14, 9, 0))
 
   // Weekday-only windows plus a holiday skip the weekend and the holiday Monday.
-  const documented = resolveConfig({ peakDays: 'weekdays', holidays: ['2026-11-16'] })
-  assert.equal(nextPeriodChange(peakTime(2026, 11, 13, 18, 30), documented), peakTime(2026, 11, 17, 9, 0))
+  const holidayConfig = resolveConfig({ holidays: ['2026-11-16'] })
+  assert.equal(nextPeriodChange(peakTime(2026, 11, 13, 18, 30), holidayConfig), peakTime(2026, 11, 17, 9, 0))
 })
 
 await test('flash prices: peak costs exactly double off-peak', () => {
@@ -293,17 +296,17 @@ await test('the session fold splits cost into cache-hit, cache-miss and output',
     }),
   ]
   const folded = foldSessionTotals(events, 0, config, at + 1)
-  // Default `flat` pricing: the off-peak column applies even inside the window.
-  assert.equal(folded.cacheHitCost, 2 * 0.02)
-  assert.equal(folded.cacheMissCost, 1 * 1)
-  assert.equal(folded.outputCost, 3 * 4)
-  assert.equal(folded.cost, 0.04 + 1 + 12)
-  // `scheduled` opts back into the published peak windows.
-  const scheduled = foldSessionTotals(events, 0, resolveConfig({ pricingMode: 'scheduled' }), at + 1)
-  assert.equal(scheduled.cacheHitCost, 2 * 0.04)
-  assert.equal(scheduled.cacheMissCost, 1 * 2)
-  assert.equal(scheduled.outputCost, 3 * 8)
-  assert.equal(scheduled.cost, 0.08 + 2 + 24)
+  // Default `scheduled` pricing: 10:00 on a Monday is inside the peak window.
+  assert.equal(folded.cacheHitCost, 2 * 0.04)
+  assert.equal(folded.cacheMissCost, 1 * 2)
+  assert.equal(folded.outputCost, 3 * 8)
+  assert.equal(folded.cost, 0.08 + 2 + 24)
+  // `flat` charges the off-peak column regardless of the clock.
+  const flat = foldSessionTotals(events, 0, resolveConfig({ pricingMode: 'flat' }), at + 1)
+  assert.equal(flat.cacheHitCost, 2 * 0.02)
+  assert.equal(flat.cacheMissCost, 1 * 1)
+  assert.equal(flat.outputCost, 3 * 4)
+  assert.equal(flat.cost, 0.04 + 1 + 12)
   // Events at or after the live cutoff are excluded.
   const withoutMessage = foldSessionTotals(events, 0, config, at)
   assert.equal(withoutMessage.cost, 0)
@@ -335,25 +338,23 @@ await test('money is truncated to cents, never rounded', () => {
   assert.equal(disk.days['2026-11-08'].cost, 1.23)
 })
 
-await test('flat pricing (the default) charges the off-peak price at every hour', async () => {
+await test('pricing mode: scheduled (default) honours the peak window, flat does not', async () => {
   await useFreshProfile()
   const at = peakTime(2026, 11, 9, 10, 0) // inside the published weekday peak window
-  const flat = await mount({}, { backfill: false })
-  flat.emit({ id: 'session-flat' }, requestHeaderEvent({ time: at }))
-  flat.emit({ id: 'session-flat' }, messageEvent({ turn: 1, step: 1, time: at, usage: { inputTokens: 2_000_000, outputTokens: 0 } }))
-  const flatSummary = flat.summary()
-  assert.equal(flatSummary.total.cost, 2, 'off-peak miss price (1 CNY/M) applies at peak hours')
-  assert.equal(flatSummary.period.kind, 'off')
-  assert.equal(flatSummary.period.pricingMode, 'flat')
-
-  await useFreshProfile()
-  const scheduled = await mount({}, { backfill: false, pricingMode: 'scheduled' })
+  const scheduled = await mount({}, { backfill: false })
   scheduled.emit({ id: 'session-scheduled' }, requestHeaderEvent({ time: at }))
   scheduled.emit({ id: 'session-scheduled' }, messageEvent({ turn: 1, step: 1, time: at, usage: { inputTokens: 2_000_000, outputTokens: 0 } }))
   const scheduledSummary = scheduled.summary()
   assert.equal(scheduledSummary.total.cost, 4, 'scheduled mode charges the peak price inside the window')
-  assert.equal(scheduledSummary.period.kind, 'peak')
   assert.equal(scheduledSummary.period.pricingMode, 'scheduled')
+
+  await useFreshProfile()
+  const flat = await mount({}, { backfill: false, pricingMode: 'flat' })
+  flat.emit({ id: 'session-flat' }, requestHeaderEvent({ time: at }))
+  flat.emit({ id: 'session-flat' }, messageEvent({ turn: 1, step: 1, time: at, usage: { inputTokens: 2_000_000, outputTokens: 0 } }))
+  const flatSummary = flat.summary()
+  assert.equal(flatSummary.total.cost, 2, 'flat mode charges the off-peak price at every hour')
+  assert.equal(flatSummary.period.pricingMode, 'flat')
 })
 
 await test('config can add models, derives the missing side, and aliases retired ids', () => {
@@ -506,7 +507,7 @@ await test('folds usage, replaces a step settlement, and bills retries separatel
   let payload = summary()
   assert.equal(payload.total.requests, 1)
   assert.equal(payload.total.cost, 2 * inputRate + outputRate)
-  assert.equal(payload.last.peak, false, 'flat pricing never labels a call peak')
+  assert.equal(payload.last.peak, isPeak(at, resolveConfig({})))
 
   emit({ id: 'session-1' }, attemptEvent({ turn: 2, step: 1, time: at, usage: { inputTokens: 1_000_000, outputTokens: 0 }, seq: 4 }))
   emit({ id: 'session-1' }, { type: 'llm/retry-started', seq: 5, time: at, data: { turn: 2, step: 1, retry: 1, retryId: 'r1' } })

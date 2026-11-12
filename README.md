@@ -37,8 +37,9 @@ DeepSeek 官方列表价（元 / 百万 token，价格页更新于 2026-09-10）
 | `deepseek-flash` 峰 / 谷 | 0.04 / 0.02 | 2 / 1 | 8 / 4 |
 | `deepseek-v4-pro` 峰 / 谷 | 0.30 / 0.15 | 9 / 4.5 | 27 / 13.5 |
 
-- **默认 `pricingMode: flat`：所有调用都按「空闲价」（0.02 / 1 / 4）计**，与实际账单一致——用官网 2026-11-08 / 11-09 / 11-10 的 token 用量（缓存命中 / 未命中 / 输出）乘空闲价并截断到分，得到的金额与官网完全一致（12.98 / 0.23 / 1.49）；官方文档里的峰时加价在这几天的账单中并未生效。
-- 如需按官方文档的峰谷日历计费，设 `pricingMode: scheduled`：此时峰时 = 北京时间 `09:00–12:00`、`14:00–18:00`（`peakDays: daily | weekdays`，`holidays` 全天按谷时），谷时 = 峰时的一半。
+- **默认 `pricingMode: scheduled`：按下面文档的峰谷日历计费**（北京时间工作日 `09:00–12:00`、`14:00–18:00` 为峰时，其余含周末/节假日为空闲价；`peakDays: daily` 可改为每天峰时）。
+- 若你的账号/时段所有调用都按空闲价出账，可设 `pricingMode: flat`（全时段用 0.02 / 1 / 4）。
+- **实测校准**：2026-11-08 / 11-09 / 11-10 的调用都发生在空闲时段，官网 token × 空闲价与账单逐分吻合（12.98 / 0.23 / 1.49）；同期官网 token 比 Session 日志多出的部分正是 auto-review 等辅助调用（插件现已计入）。
 - 缓存写入按缓存未命中价计（可用 `cacheWrite` 覆盖）；旧模型名（`deepseek-v4-flash` 等）自动别名，未知模型回退 `deepseek-flash` 并标记「估算」。
 - 金额一律按 **元** 计、**只保留小数点后两位（末位直接舍去，不四舍五入）**：持久化的 `usage.json` 与所有接口返回值都用两位小数，界面也固定显示 `¥x.xx`。
 - 价格 / 计费模式 / 峰谷日历 / 节假日属于计费口径：改动后插件会用会话日志**重算全部历史**（`pricingSignature` 变化触发），避免新旧价目混算。
@@ -60,8 +61,8 @@ DeepSeek 官方列表价（元 / 百万 token，价格页更新于 2026-09-10）
     aliases:
       deepseek-v4-flash: deepseek-flash
     fallbackModel: deepseek-flash
-    pricingMode: flat   # flat（默认，与官网实际账单一致）| scheduled（文档峰谷日历）
-    peakDays: daily     # scheduled 模式下的峰时日期：daily | weekdays
+    pricingMode: scheduled # scheduled（默认，文档峰谷日历）| flat（全时段空闲价）
+    peakDays: weekdays  # 峰时日期：weekdays（文档口径）| daily（每天）
     peakWindows: ['09:00-12:00', '14:00-18:00']
     holidays: ['2026-10-01', '2026-10-02']   # 北京时间指定日期，全天按谷时
     retainDays: 400     # 日粒度保留天数（下限 371，热力图需要）
