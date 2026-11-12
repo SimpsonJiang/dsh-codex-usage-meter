@@ -451,6 +451,7 @@ export function createState() {
     sessions: {},
     slots: {},
     last: null,
+    aux: { requests: 0, cost: 0, tokens: 0, byPurpose: {} },
     backfill: { state: 'pending' },
     sessionReconcile: { state: 'pending' },
   }
@@ -622,6 +623,21 @@ export function sanitizeState(raw) {
       ...(raw.sessionReconcile.truncated === true ? { truncated: true } : {}),
     }
   }
+  if (isRecord(raw.aux)) {
+    const byPurpose = {}
+    if (isRecord(raw.aux.byPurpose)) {
+      for (const [purpose, cost] of Object.entries(raw.aux.byPurpose)) {
+        if (typeof purpose !== 'string' || purpose === '' || purpose.length > 80) continue
+        byPurpose[purpose] = nonNegative(cost) ?? 0
+      }
+    }
+    state.aux = {
+      requests: Math.max(0, Math.floor(finiteNumber(raw.aux.requests) ?? 0)),
+      cost: nonNegative(raw.aux.cost) ?? 0,
+      tokens: Math.max(0, Math.floor(finiteNumber(raw.aux.tokens) ?? 0)),
+      byPurpose,
+    }
+  }
   return state
 }
 
@@ -672,6 +688,15 @@ export function serializeState(state) {
     sessions: mapBuckets(state.sessions),
     slots,
     last: state.last === null ? null : { ...state.last, cost: truncateCost(state.last.cost) },
+    aux: {
+      requests: Math.max(0, Math.floor(finiteNumber(state.aux?.requests) ?? 0)),
+      cost: truncateCost(state.aux?.cost),
+      tokens: Math.max(0, Math.floor(finiteNumber(state.aux?.tokens) ?? 0)),
+      byPurpose: Object.fromEntries(
+        Object.entries(isRecord(state.aux?.byPurpose) ? state.aux.byPurpose : {})
+          .map(([purpose, cost]) => [purpose, truncateCost(cost)]),
+      ),
+    },
   })
 }
 
@@ -1041,6 +1066,15 @@ export function buildStats(state, config, now) {
     },
     days,
     models: presentModels(state),
+    auxCalls: {
+      requests: Math.max(0, Math.floor(finiteNumber(state.aux?.requests) ?? 0)),
+      cost: truncateCost(state.aux?.cost),
+      tokens: Math.max(0, Math.floor(finiteNumber(state.aux?.tokens) ?? 0)),
+      byPurpose: Object.fromEntries(
+        Object.entries(isRecord(state.aux?.byPurpose) ? state.aux.byPurpose : {})
+          .map(([purpose, cost]) => [purpose, truncateCost(cost)]),
+      ),
+    },
     pricing: {
       currency: 'CNY',
       unit: '1M tokens',
@@ -1439,6 +1473,61 @@ export function apply(ctx, rawConfig) {
 
   ctx.on('session/event', onSessionEvent)
 
+  // Auxiliary model calls (auto-review, and any future purposeful callers) do
+  // not settle an `assistant/message`, so their usage never reaches
+  // session/event. Intercept the `llm/stream` waterfall to bill them too, which
+  // is what makes the daily/session totals match DeepSeek's own bill.
+  const auxBuffer = []
+  const recordAuxUsage = ({ time, purpose, provider, model, sessionId, usage: rawUsage }) => {
+    const usage = readUsage(rawUsage)
+    const tokens = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+    if (tokens <= 0) return
+    const contribution = makeContribution({ usage, provider, model, time, config })
+    applyContribution(contribution, 1, sessionId)
+    state.aux = isRecord(state.aux) ? state.aux : { requests: 0, cost: 0, tokens: 0, byPurpose: {} }
+    state.aux.requests = (Math.max(0, Math.floor(finiteNumber(state.aux.requests) ?? 0)) + 1)
+    state.aux.cost = (nonNegative(state.aux.cost) ?? 0) + contribution.cost
+    state.aux.tokens = (Math.max(0, Math.floor(finiteNumber(state.aux.tokens) ?? 0)) + tokens)
+    if (!isRecord(state.aux.byPurpose)) state.aux.byPurpose = {}
+    state.aux.byPurpose[purpose] = (nonNegative(state.aux.byPurpose[purpose]) ?? 0) + contribution.cost
+    state.revision += 1
+    state.updatedAt = Date.now()
+    markDirty()
+  }
+  ctx.on('llm/stream', (options, next) => {
+    const stream = next()
+    const purpose = typeof options?.purpose === 'string' ? options.purpose.trim() : ''
+    // The agent loop's own requests carry no purpose and are already billed by
+    // their `assistant/message` settlement; only purposeful callers are aux.
+    if (purpose === '' || purpose === 'agent') return stream
+    const entry = {
+      time: Date.now(),
+      purpose: purpose.slice(0, 80),
+      provider: typeof options?.provider === 'string' ? options.provider : '',
+      model: typeof options?.model === 'string' ? options.model : '',
+      sessionId: typeof options?.sessionId === 'string' ? options.sessionId : undefined,
+      usage: undefined,
+    }
+    return (async function* observeAuxStream() {
+      try {
+        for await (const chunk of stream) {
+          if (isRecord(chunk) && chunk.type === 'usage' && isRecord(chunk.usage)) entry.usage = chunk.usage
+          yield chunk
+        }
+      } finally {
+        if (entry.usage !== undefined) {
+          try {
+            if (loaded) recordAuxUsage(entry)
+            else auxBuffer.push(entry)
+          } catch (error) {
+            // Never let metering break a provider call.
+            console.warn(`[dsh-usage-meter] auxiliary usage was not recorded: ${messageOf(error)}`)
+          }
+        }
+      }
+    })()
+  })
+
   ctx.effect(() => {
     let cancelled = false
     /** Buffered pre-reconcile events already folded into a Session total. */
@@ -1456,6 +1545,8 @@ export function apply(ctx, rawConfig) {
         const alreadyReconciled = time < reconcileCutoff && reconciledSessions.has(sessionId)
         ingest(sessionId, event, alreadyReconciled ? { skipSession: true } : {})
       }
+      const queuedAux = auxBuffer.splice(0)
+      for (const entry of queuedAux) recordAuxUsage(entry)
       void persist()
     }
     void (async () => {

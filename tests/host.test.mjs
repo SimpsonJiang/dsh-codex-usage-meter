@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Node test for the usage-meter Host half. Runs the real plugin entry against a
  * fake Cordis context: exercises pricing, the session-event fold (replacement,
  * retry and turn-duration semantics), per-Session totals, the KPIs, both JSON
@@ -143,6 +143,17 @@ async function mount(services, config) {
     summaryRoute,
     statsRoute,
     emit: (session, event) => fake.listeners.get('session/event')(session, event),
+    /** Drive the registered llm/stream waterfall listener with a fake chunk stream. */
+    callLlmStream: async (options, chunks) => {
+      const handler = fake.listeners.get('llm/stream')
+      assert.equal(typeof handler, 'function', 'llm/stream listener registered')
+      const stream = (async function* () {
+        for (const chunk of chunks) yield chunk
+      })()
+      const seen = []
+      for await (const chunk of handler(options, () => stream)) seen.push(chunk)
+      return seen
+    },
     summary: (query = '') => callRoute(summaryRoute, { url: `/dsh-usage-meter/summary${query}` }).payload,
     stats: () => callRoute(statsRoute).payload,
   }
@@ -605,6 +616,50 @@ await test('a pricing change rebuilds the retained history from session logs', a
 })
 
 // ---------------------------------------------------------------------------
+// Auxiliary model calls (auto-review and other purposeful callers)
+// ---------------------------------------------------------------------------
+
+await test('bills purposeful llm/stream calls without double counting the agent loop', async () => {
+  const dir = await useFreshProfile()
+  const at = Date.now() - 60_000
+  const rate = flashInputRate(at)
+  const { emit, callLlmStream, summary, stats } = await mount({}, { backfill: false, flushMs: 250 })
+  emit({ id: 'aux-session' }, requestHeaderEvent({ time: at }))
+  emit({ id: 'aux-session' }, messageEvent({ turn: 1, step: 1, time: at, usage: { inputTokens: 1_000_000, outputTokens: 0 } }))
+  await sleep(50)
+  assert.equal(summary().total.requests, 1)
+
+  // An agent-loop-shaped call has no purpose: already billed by its message.
+  const passthrough = await callLlmStream(
+    { provider: 'deepseek-official', model: 'deepseek-flash', sessionId: 'aux-session' },
+    [{ type: 'usage', usage: { inputTokens: 500_000, outputTokens: 0 } }, { type: 'finish' }],
+  )
+  assert.equal(passthrough.length, 2)
+  assert.equal(summary().total.requests, 1, 'agent-loop calls are not counted twice')
+
+  // An auxiliary call (auto-review) carries a purpose and must be billed.
+  const auxRate = flashInputRate(Date.now())
+  const auxUsage = { inputTokens: 250_000, outputTokens: 10_000, cacheReadTokens: 100_000 }
+  await callLlmStream(
+    { provider: 'deepseek-official', model: 'deepseek-flash', sessionId: 'aux-session', purpose: 'auto-review' },
+    [{ type: 'usage', usage: auxUsage }, { type: 'finish' }],
+  )
+  const expectedAuxCost = (auxUsage.inputTokens * auxRate + auxUsage.cacheReadTokens * (auxRate * 0.02) + auxUsage.outputTokens * (auxRate * 4)) / 1_000_000
+  const payload = summary()
+  const sessionPayload = summary('?session=aux-session')
+  assert.equal(payload.total.requests, 2, 'the auxiliary call is counted once')
+  assert.equal(sessionPayload.session.requests, 2)
+  assert.equal(Math.abs(sessionPayload.session.cost - (rate + expectedAuxCost)) <= 0.02, true, 'the session includes the auxiliary cost')
+  const statsPayload = stats()
+  assert.equal(statsPayload.auxCalls.requests, 1)
+  assert.equal(Math.abs(statsPayload.auxCalls.cost - expectedAuxCost) <= 0.02, true)
+  assert.equal(statsPayload.auxCalls.byPurpose['auto-review'] !== undefined, true)
+  await sleep(700)
+  const saved = JSON.parse(await readFile(join(dir, 'plugin-data', 'dsh-usage-meter', 'usage.json'), 'utf8'))
+  assert.equal(saved.aux.requests, 1)
+})
+
+// ---------------------------------------------------------------------------
 // Backfill
 // ---------------------------------------------------------------------------
 
@@ -748,3 +803,4 @@ await test('an upgraded install extends history without touching counted days', 
 await rm(profileDir, { recursive: true, force: true })
 console.log(`\n${passed} passed, ${failures.length} failed`)
 if (failures.length > 0) process.exitCode = 1
+

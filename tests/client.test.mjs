@@ -487,9 +487,13 @@ function columnBars(tree) {
     }
   }
   for (const entry of columns.values()) {
+    const maxRow = Math.max(...entry.rows)
     entry.height = entry.filledRows.length
+    // The last week is partial (it ends today), so a bar is contiguous when it
+    // fills every existing row from the column's bottom cell upward.
     entry.suffix = entry.filledRows.length === 0
-      || (Math.max(...entry.filledRows) === 6 && Math.min(...entry.filledRows) === 7 - entry.filledRows.length)
+      || (Math.max(...entry.filledRows) === maxRow
+        && Math.min(...entry.filledRows) === maxRow - entry.filledRows.length + 1)
   }
   return [...columns.entries()].sort((left, right) => left[0] - right[0]).map(([, entry]) => entry)
 }
@@ -572,11 +576,14 @@ pageTree = render(React.createElement(pageComponent, { t: zh }))
 bars = columnBars(pageTree)
 for (const bar of bars) assert.equal(bar.suffix, true, 'cumulative bars are contiguous from the bottom row')
 let monotonic = true
-for (let index = 1; index < bars.length; index += 1) {
-  if (bars[index].height < bars[index - 1].height) monotonic = false
+// The first and last weeks are partial columns, so compare complete weeks only.
+const fullBars = bars.filter((bar) => bar.rows.length === 7)
+for (let index = 1; index < fullBars.length; index += 1) {
+  if (fullBars[index].height < fullBars[index - 1].height) monotonic = false
 }
 assert.equal(monotonic, true, 'cumulative bars never shrink')
-assert.equal(bars[bars.length - 1].height, 7, 'the final cumulative value fills the column')
+const lastBar = bars[bars.length - 1]
+assert.equal(lastBar.filledRows.length, lastBar.rows.length, 'the final cumulative value fills every existing cell')
 assert.equal(textOf(pageTree).includes('柱高表示截至该周的累计用量'), true)
 const filledCumulativeCell = findFilledCell(pageTree)
 filledCumulativeCell.props.onMouseEnter()
