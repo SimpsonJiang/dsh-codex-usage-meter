@@ -567,11 +567,6 @@ window.__ModuleLoader__.load({
         "[data-turn-tail][data-actions-reveal='always']:focus-within .actions{opacity:1 !important}",
         '}',
         '[data-turn-tail]{--dum-tertiary:color-mix(in srgb,var(--dsw-alias-label-secondary,#5c5c5c) 74%,transparent)}',
-        '.dum-turn-chip{display:inline-flex;align-items:center;height:calc(28px + var(--dsh-content-font-delta,0px));',
-        'color:var(--dum-tertiary,#8a8a8a);cursor:pointer;',
-        'font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);',
-        'font-variant-numeric:tabular-nums;white-space:nowrap}',
-        '.dum-turn-chip:hover,.dum-turn-chip[aria-expanded=true]{color:var(--dsw-alias-label-secondary,#5c5c5c)}',
         '[data-turn-tail][data-dum-open] .actions{opacity:1 !important}',
         '.dum-turn-pop{position:fixed;z-index:1200;display:flex;flex-direction:column;gap:4px;',
         'min-width:176px;padding:8px 10px;border-radius:8px;pointer-events:auto;',
@@ -585,10 +580,15 @@ window.__ModuleLoader__.load({
         'border-color:rgba(255,255,255,.12);box-shadow:0 10px 28px rgba(0,0,0,.5)}',
         'body[data-ds-dark-theme] .dum-turn-pop__label{color:#a6aab2}',
         'body[data-ds-dark-theme] .dum-turn-pop__value{color:#f2f3f5}',
-        '.dum-turn-tip{position:fixed;z-index:1300;pointer-events:none;padding:5px 9px;border-radius:6px;',
-        'background:#0f1115;color:#fff;font-size:12px;line-height:17px;white-space:nowrap;',
-        'box-shadow:0 4px 14px rgba(0,0,0,.18)}',
-        'body[data-ds-dark-theme] .dum-turn-tip{background:#2b2b2e;border:1px solid rgba(255,255,255,.14)}',
+        '.dum-turn-chip{display:inline-flex;align-items:center;height:calc(28px + var(--dsh-content-font-delta,0px));',
+        'padding:0 6px;border-radius:var(--dsw-radius-sm,6px);cursor:pointer;',
+        'color:var(--dum-tertiary,#8a8a8a);',
+        'font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);',
+        'font-variant-numeric:tabular-nums;white-space:nowrap;transition:background-color 100ms ease,color 100ms ease}',
+        '.dum-turn-chip:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04));color:var(--dsw-alias-label-secondary,#5c5c5c)}',
+        '.dum-turn-chip[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04));color:var(--dsw-alias-label-secondary,#5c5c5c)}',
+        'body[data-ds-dark-theme] .dum-turn-chip:hover,',
+        "body[data-ds-dark-theme] .dum-turn-chip[aria-expanded='true']{background:rgba(255,255,255,.08)}",
       ].join('')
       document.head.appendChild(style)
       return () => {
@@ -786,7 +786,6 @@ window.__ModuleLoader__.load({
       const turn = messageTurnOf(data, props.messageId)
       const entry = turn === undefined ? undefined : turnEntryOf(data, turn)
       const [open, setOpen] = React.useState(false)
-      const [hover, setHover] = React.useState(false)
       const buttonRef = React.useRef(null)
 
       // The just-finished Turn settles in the Chat before its durable log is
@@ -846,9 +845,9 @@ window.__ModuleLoader__.load({
         const place = () => {
           const rect = anchor.getBoundingClientRect()
           const size = node.getBoundingClientRect()
-          const left = Math.max(8, Math.min(window.innerWidth - 8 - size.width, rect.right - size.width))
-          let top = rect.top - size.height - 8
-          if (top < 8) top = rect.bottom + 8
+          const left = Math.max(8, Math.min(window.innerWidth - 8 - size.width, rect.left + rect.width / 2 - size.width / 2))
+          let top = rect.bottom + 8
+          if (top + size.height > window.innerHeight - 8) top = rect.top - size.height - 8
           node.style.left = `${Math.round(left)}px`
           node.style.top = `${Math.round(top)}px`
         }
@@ -874,36 +873,6 @@ window.__ModuleLoader__.load({
         }
       }, [open, entry === undefined ? '' : entry.cacheHitCost, entry === undefined ? '' : entry.cacheMissCost, entry === undefined ? '' : entry.outputCost, props.t])
 
-      // Mirror the shipped icon tooltips: a dark hint bubble above the chip.
-      React.useEffect(() => {
-        if (!hover || open || entry === undefined) return undefined
-        if (typeof document === 'undefined' || typeof document.createElement !== 'function') return undefined
-        const anchor = buttonRef.current
-        if (anchor === null || anchor === undefined || typeof window === 'undefined') return undefined
-        const node = document.createElement('div')
-        node.className = 'dum-turn-tip'
-        node.setAttribute('role', 'tooltip')
-        node.textContent = typeof props.t === 'function' ? props.t('turn.popover') : 'Turn cost breakdown'
-        document.body.appendChild(node)
-        const place = () => {
-          const rect = anchor.getBoundingClientRect()
-          const size = node.getBoundingClientRect()
-          const left = Math.max(8, Math.min(window.innerWidth - 8 - size.width, rect.left + rect.width / 2 - size.width / 2))
-          let top = rect.top - size.height - 8
-          if (top < 8) top = rect.bottom + 8
-          node.style.left = `${Math.round(left)}px`
-          node.style.top = `${Math.round(top)}px`
-        }
-        place()
-        window.addEventListener('resize', place)
-        window.addEventListener('scroll', place, true)
-        return () => {
-          node.remove()
-          window.removeEventListener('resize', place)
-          window.removeEventListener('scroll', place, true)
-        }
-      }, [hover, open, entry === undefined, props.t])
-
       if (entry === undefined) return null
       return h('span', {
         ref: buttonRef,
@@ -914,10 +883,6 @@ window.__ModuleLoader__.load({
         'aria-haspopup': 'dialog',
         'aria-expanded': open,
         onClick: () => setOpen((value) => !value),
-        onMouseEnter: () => setHover(true),
-        onMouseLeave: () => setHover(false),
-        onFocus: () => setHover(true),
-        onBlur: () => setHover(false),
         onKeyDown: (event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return
           event.preventDefault()
