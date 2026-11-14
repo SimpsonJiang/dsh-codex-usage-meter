@@ -298,13 +298,10 @@ window.__ModuleLoader__.load({
       '.dum-model__cost{flex:none;min-width:76px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}',
       '.dum-models__empty{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8a8a);padding:8px 0 2px}',
       '@media (max-width:640px){.dum-model__meta{display:none}}',
-      '.dum-turn-cost{display:flex;justify-content:flex-end;padding:0 2px;',
-      'color:var(--dsw-alias-label-tertiary,#8a8a8a);font-size:12px;line-height:18px;',
-      'font-variant-numeric:tabular-nums;user-select:none}',
-      '.dum-turn-chip{display:inline-flex;align-items:center;height:20px;padding:0 6px;',
-      'border-radius:6px;color:var(--dsw-alias-label-secondary,#5c5c5c);',
-      'background:color-mix(in srgb,var(--dsw-alias-label-secondary,#5c5c5c) 8%,transparent);',
-      'font-size:12px;line-height:18px;font-variant-numeric:tabular-nums;user-select:none}',
+      '.dum-turn-chip{display:inline-flex;align-items:center;height:calc(28px + var(--dsh-content-font-delta,0px));',
+      'color:var(--dsw-alias-label-tertiary,#8a8a8a);',
+      'font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);',
+      'font-variant-numeric:tabular-nums;white-space:nowrap;user-select:none}',
     ].join('')
 
     // -----------------------------------------------------------------------
@@ -557,6 +554,29 @@ window.__ModuleLoader__.load({
       return typeof turn === 'number' && Number.isFinite(turn) ? turn : undefined
     }
 
+    /**
+     * The shipped Chat keeps the latest turn's action row permanently visible
+     * (`data-actions-reveal="always"`); this plugin's reader should behave like
+     * every other row — hidden until the turn is hovered or focused.
+     */
+    function installTurnRowStyle() {
+      if (typeof document === 'undefined' || typeof document.createElement !== 'function'
+        || document.head === null || document.head === undefined) return () => {}
+      const style = document.createElement('style')
+      style.setAttribute('data-dsh-usage-meter-turn-row', '')
+      style.textContent = [
+        '@media (hover: hover){',
+        "[data-turn-tail][data-actions-reveal='always'] .actions{opacity:0 !important;transition:opacity 80ms ease}",
+        "[data-turn-tail][data-actions-reveal='always']:hover .actions,",
+        "[data-turn-tail][data-actions-reveal='always']:focus-within .actions{opacity:1 !important}",
+        '}',
+      ].join('')
+      document.head.appendChild(style)
+      return () => {
+        style.remove()
+      }
+    }
+
     // -----------------------------------------------------------------------
     // Heatmap
     // -----------------------------------------------------------------------
@@ -741,16 +761,7 @@ window.__ModuleLoader__.load({
       return lines.join('\n')
     }
 
-    /** Bare `¥x.xx` for one completed Turn, registered in `conversation.chat.turnTail`. */
-    function TurnCostTail(props) {
-      const data = useTurnData(props.sessionId)
-      const turn = props.turn !== null && typeof props.turn === 'object' ? props.turn.turn : undefined
-      const cost = typeof turn === 'number' ? turnCostOf(data, turn) : null
-      if (cost === null) return null
-      return h('div', { className: 'dum-turn-cost', 'data-dsh-usage-meter-turn': String(turn) }, formatCny(cost))
-    }
-
-    /** The same reading as a compact chip in the Turn footer's action row. */
+    /** The Turn's total cost as a compact reading in the footer's action row. */
     function TurnCostAction(props) {
       const data = useTurnData(props.sessionId)
       const turn = messageTurnOf(data, props.messageId)
@@ -1092,10 +1103,7 @@ window.__ModuleLoader__.load({
           { name: 'shell.bottom', locale: NS, inject: () => ({ openStats }) },
           UsageStatusBar,
         ))
-        ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register(
-          { name: 'conversation.chat.turnTail', id: 'dsh-usage-meter-turn', order: 20, locale: NS },
-          TurnCostTail,
-        ))
+        ctx.effect(() => installTurnRowStyle(), 'dsh-usage-meter: turn row style')
         ctx.slots.inject('conversation.chat.assistant-actions', () => ctx.slots.register(
           { name: 'conversation.chat.assistant-actions', id: 'dsh-usage-meter-turn', order: 20, locale: NS },
           TurnCostAction,

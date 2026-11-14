@@ -228,21 +228,17 @@ moduleExports.apply(fakeClientContext)
 
 assert.deepEqual(injections.sort(), [
   'conversation.chat.assistant-actions',
-  'conversation.chat.turnTail',
   'main',
   'shell.bottom',
   'sidebar.panellist',
 ])
-assert.equal(slotRegistrations.length, 5)
+assert.equal(slotRegistrations.length, 4)
 
 const panelRegistration = slotRegistrations.find((entry) => entry.options.name === 'main')
 const sidebarRegistration = slotRegistrations.find((entry) => entry.options.name === 'sidebar.panellist')
 const barRegistration = slotRegistrations.find((entry) => entry.options.name === 'shell.bottom')
-const turnTailRegistration = slotRegistrations.find((entry) => entry.options.name === 'conversation.chat.turnTail')
 const assistantActionRegistration = slotRegistrations.find((entry) => entry.options.name === 'conversation.chat.assistant-actions')
-assert.equal(turnTailRegistration.options.id, 'dsh-usage-meter-turn')
 assert.equal(assistantActionRegistration.options.id, 'dsh-usage-meter-turn')
-assert.equal(typeof turnTailRegistration.Component, 'function')
 assert.equal(typeof assistantActionRegistration.Component, 'function')
 assert.equal(panelRegistration.options.key, 'usage-meter')
 assert.equal(sidebarRegistration.options.id, 'usage-meter')
