@@ -1256,6 +1256,19 @@ export function apply(ctx, rawConfig) {
   const turnStarts = new Map()
   /** Lazily folded per-Turn costs, dropped whenever the session log advances. */
   const turnCache = new Map()
+  /** Newest live events per session, so a just-settled Turn folds before the log flushes. */
+  const liveEvents = new Map()
+  const LIVE_EVENT_LIMIT = 400
+  const recordLiveEvent = (sessionId, event) => {
+    if (!isRecord(event) || typeof event.type !== 'string') return
+    let list = liveEvents.get(sessionId)
+    if (list === undefined) {
+      list = []
+      liveEvents.set(sessionId, list)
+    }
+    list.push(event)
+    if (list.length > LIVE_EVENT_LIMIT) list.splice(0, list.length - LIVE_EVENT_LIMIT)
+  }
 
   const markDirty = () => {
     dirty = true
@@ -1401,6 +1414,7 @@ export function apply(ctx, rawConfig) {
   const onSessionEvent = (session, event) => {
     const sessionId = typeof session?.id === 'string' ? session.id : String(session?.id ?? '')
     turnCache.delete(sessionId)
+    recordLiveEvent(sessionId, event)
     if (!loaded || backfilling) {
       if (buffer.length < BUFFER_LIMIT) buffer.push([sessionId, event])
       return
@@ -1854,12 +1868,18 @@ export function apply(ctx, rawConfig) {
       let payload = cached !== undefined && Date.now() - cached.at < 1_500 ? cached.payload : undefined
       if (payload === undefined) {
         const snapshot = await readSessionLog({ header: { id: session } })
-        if (snapshot === undefined) {
+        const tail = liveEvents.get(session)
+        if (snapshot === undefined && tail === undefined) {
           sendJson(response, 404, { ok: false, error: 'session unavailable' })
           return
         }
-        const inherited = Math.max(0, integerOf(snapshot.inheritedEventCount) ?? 0)
-        payload = foldTurnCosts(snapshot.events, inherited, config)
+        const bySeq = new Map()
+        for (const event of Array.isArray(snapshot?.events) ? snapshot.events : []) {
+          bySeq.set(String(event?.seq), event)
+        }
+        for (const event of tail ?? []) bySeq.set(String(event?.seq), event)
+        const inherited = Math.max(0, integerOf(snapshot?.inheritedEventCount) ?? 0)
+        payload = foldTurnCosts([...bySeq.values()], inherited, config)
         turnCache.set(session, { at: Date.now(), payload })
       }
       sendJson(response, 200, { ok: true, session, turns: payload.turns, messages: payload.messages })

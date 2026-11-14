@@ -507,9 +507,9 @@ window.__ModuleLoader__.load({
     /** Short-lived per-Session cache; every turn footer mount revalidates it. */
     const turnDataCache = new Map()
 
-    async function loadTurnData(sessionId) {
+    async function loadTurnData(sessionId, force) {
       const cached = turnDataCache.get(sessionId)
-      if (cached !== undefined && Date.now() - cached.at < 1_500) return cached.data
+      if (force !== true && cached !== undefined && Date.now() - cached.at < 1_500) return cached.data
       const data = await fetchJson(endpointPath(TURNS_ROUTE, `session=${encodeURIComponent(sessionId)}`))
       turnDataCache.set(sessionId, { at: Date.now(), data })
       return data
@@ -521,22 +521,19 @@ window.__ModuleLoader__.load({
         const cached = typeof sessionId === 'string' ? turnDataCache.get(sessionId) : undefined
         return cached === undefined ? null : cached.data
       })
-      React.useEffect(() => {
-        if (typeof sessionId !== 'string' || sessionId === '') return undefined
-        let disposed = false
-        void (async () => {
-          try {
-            const next = await loadTurnData(sessionId)
-            if (!disposed) setData(next)
-          } catch {
-            // A missing log only hides the per-Turn reading.
-          }
-        })()
-        return () => {
-          disposed = true
+      const refresh = React.useCallback(async (force) => {
+        if (typeof sessionId !== 'string' || sessionId === '') return
+        try {
+          const next = await loadTurnData(sessionId, force === true)
+          setData(next)
+        } catch {
+          // A missing log only hides the per-Turn reading.
         }
       }, [sessionId])
-      return data
+      React.useEffect(() => {
+        void refresh(false)
+      }, [refresh])
+      return [data, refresh]
     }
 
     function turnEntryOf(data, turn) {
@@ -578,12 +575,16 @@ window.__ModuleLoader__.load({
         '[data-turn-tail][data-dum-open] .actions{opacity:1 !important}',
         '.dum-turn-pop{position:fixed;z-index:1200;display:flex;flex-direction:column;gap:4px;',
         'min-width:176px;padding:8px 10px;border-radius:8px;pointer-events:auto;',
-        'background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);',
-        'border:1px solid var(--dsw-alias-border-l2,#e6e6e6);box-shadow:0 6px 20px rgba(0,0,0,.22);',
+        'background:#fff;color:#1a1a1a;',
+        'border:1px solid rgba(0,0,0,.08);box-shadow:0 6px 20px rgba(0,0,0,.16);',
         'font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}',
         '.dum-turn-pop__row{display:flex;align-items:baseline;justify-content:space-between;gap:18px;white-space:nowrap}',
-        '.dum-turn-pop__label{color:var(--dsw-alias-label-secondary,#5c5c5c)}',
-        '.dum-turn-pop__value{color:var(--dsw-alias-label-primary,#1a1a1a)}',
+        '.dum-turn-pop__label{color:#5c5c5c}',
+        '.dum-turn-pop__value{color:#1a1a1a}',
+        'body[data-ds-dark-theme] .dum-turn-pop{background:#26262a;color:#f2f3f5;',
+        'border-color:rgba(255,255,255,.12);box-shadow:0 10px 28px rgba(0,0,0,.5)}',
+        'body[data-ds-dark-theme] .dum-turn-pop__label{color:#a6aab2}',
+        'body[data-ds-dark-theme] .dum-turn-pop__value{color:#f2f3f5}',
       ].join('')
       document.head.appendChild(style)
       return () => {
@@ -777,11 +778,36 @@ window.__ModuleLoader__.load({
 
     /** Turn cost chip; clicking opens the three cost parts in a fixed bubble. */
     function TurnCostAction(props) {
-      const data = useTurnData(props.sessionId)
+      const [data, refresh] = useTurnData(props.sessionId)
       const turn = messageTurnOf(data, props.messageId)
       const entry = turn === undefined ? undefined : turnEntryOf(data, turn)
       const [open, setOpen] = React.useState(false)
       const buttonRef = React.useRef(null)
+
+      // The just-finished Turn settles in the Chat before its durable log is
+      // readable by the Host fold; re-read a few times until it appears.
+      React.useEffect(() => {
+        if (entry !== undefined) return undefined
+        if (typeof props.sessionId !== 'string' || props.sessionId === '') return undefined
+        let disposed = false
+        let attempts = 0
+        let timer = null
+        const tick = () => {
+          if (disposed || attempts >= 4) return
+          attempts += 1
+          timer = setTimeout(() => {
+            void (async () => {
+              await refresh(true)
+              if (!disposed) tick()
+            })()
+          }, attempts === 1 ? 400 : 900)
+        }
+        tick()
+        return () => {
+          disposed = true
+          if (timer !== null) clearTimeout(timer)
+        }
+      }, [entry === undefined, refresh, props.sessionId])
 
       React.useEffect(() => {
         if (!open || entry === undefined) return undefined
