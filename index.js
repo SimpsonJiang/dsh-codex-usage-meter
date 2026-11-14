@@ -908,7 +908,14 @@ export function foldTurnCosts(events, inherited, config, cap) {
   const turns = []
   for (const [turn, bucket] of [...buckets].sort((left, right) => left[0] - right[0])) {
     if (bucket.requests <= 0 || bucket.cost <= 0) continue
-    turns.push({ turn, cost: roundCost(bucket.cost), totalTokens: totalTokensOf(bucket) })
+    turns.push({
+      turn,
+      cost: roundCost(bucket.cost),
+      cacheHitCost: roundCost(bucket.cacheHitCost),
+      cacheMissCost: roundCost(bucket.cacheMissCost),
+      outputCost: roundCost(bucket.outputCost),
+      totalTokens: totalTokensOf(bucket),
+    })
   }
   return { turns, messages: Object.fromEntries(messages) }
 }

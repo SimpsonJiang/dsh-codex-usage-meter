@@ -69,6 +69,11 @@ window.__ModuleLoader__.load({
         'page.trackedSince': '统计自 {time}',
         'page.auxCalls': '含辅助模型调用 {count} 次（{cost}）',
 
+        'turn.hit': '输入（缓存命中）',
+        'turn.miss': '输入（缓存未命中）',
+        'turn.output': '输出',
+        'turn.popover': '本轮花费明细',
+
         'kpi.totalTokens': '累计 Token 数',
         'kpi.totalCost': '累计费用',
         'kpi.peak': 'Token 使用峰值',
@@ -139,6 +144,11 @@ window.__ModuleLoader__.load({
         'page.retry': 'Retry',
         'page.trackedSince': 'Tracked since {time}',
         'page.auxCalls': 'Includes {count} auxiliary model calls ({cost})',
+
+        'turn.hit': 'Input (cache hit)',
+        'turn.miss': 'Input (cache miss)',
+        'turn.output': 'Output',
+        'turn.popover': 'Turn cost breakdown',
 
         'kpi.totalTokens': 'Total tokens',
         'kpi.totalCost': 'Total cost',
@@ -293,10 +303,6 @@ window.__ModuleLoader__.load({
       '.dum-model__cost{flex:none;min-width:76px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}',
       '.dum-models__empty{font-size:12px;color:var(--dum-tertiary,#8a8a8a);padding:8px 0 2px}',
       '@media (max-width:640px){.dum-model__meta{display:none}}',
-      '.dum-turn-chip{display:inline-flex;align-items:center;height:calc(28px + var(--dsh-content-font-delta,0px));',
-      'color:var(--dum-tertiary,#8a8a8a);',
-      'font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);',
-      'font-variant-numeric:tabular-nums;white-space:nowrap;user-select:none}',
     ].join('')
 
     // -----------------------------------------------------------------------
@@ -533,14 +539,12 @@ window.__ModuleLoader__.load({
       return data
     }
 
-    function turnCostOf(data, turn) {
-      if (data === null || typeof data !== 'object' || !Array.isArray(data.turns)) return null
+    function turnEntryOf(data, turn) {
+      if (data === null || typeof data !== 'object' || !Array.isArray(data.turns)) return undefined
       for (const entry of data.turns) {
-        if (entry !== null && typeof entry === 'object' && entry.turn === turn) {
-          return numberOrZero(entry.cost)
-        }
+        if (entry !== null && typeof entry === 'object' && entry.turn === turn) return entry
       }
-      return null
+      return undefined
     }
 
     function messageTurnOf(data, messageId) {
@@ -565,6 +569,21 @@ window.__ModuleLoader__.load({
         "[data-turn-tail][data-actions-reveal='always']:hover .actions,",
         "[data-turn-tail][data-actions-reveal='always']:focus-within .actions{opacity:1 !important}",
         '}',
+        '[data-turn-tail]{--dum-tertiary:color-mix(in srgb,var(--dsw-alias-label-secondary,#5c5c5c) 74%,transparent)}',
+        '.dum-turn-chip{display:inline-flex;align-items:center;height:calc(28px + var(--dsh-content-font-delta,0px));',
+        'color:var(--dum-tertiary,#8a8a8a);cursor:pointer;',
+        'font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);',
+        'font-variant-numeric:tabular-nums;white-space:nowrap}',
+        '.dum-turn-chip:hover,.dum-turn-chip[aria-expanded=true]{color:var(--dsw-alias-label-secondary,#5c5c5c)}',
+        '[data-turn-tail][data-dum-open] .actions{opacity:1 !important}',
+        '.dum-turn-pop{position:fixed;z-index:1200;display:flex;flex-direction:column;gap:4px;',
+        'min-width:176px;padding:8px 10px;border-radius:8px;pointer-events:auto;',
+        'background:var(--dsw-static-neutral-bluish-1000,#0f1115);color:#fff;',
+        'border:1px solid rgba(255,255,255,.14);box-shadow:0 6px 20px rgba(0,0,0,.32);',
+        'font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}',
+        '.dum-turn-pop__row{display:flex;align-items:baseline;justify-content:space-between;gap:18px;white-space:nowrap}',
+        '.dum-turn-pop__label{color:#b9bdc6}',
+        '.dum-turn-pop__value{color:#fff}',
       ].join('')
       document.head.appendChild(style)
       return () => {
@@ -756,13 +775,90 @@ window.__ModuleLoader__.load({
       return lines.join('\n')
     }
 
-    /** The Turn's total cost as a compact reading in the footer's action row. */
+    /** Turn cost chip; clicking opens the three cost parts in a fixed bubble. */
     function TurnCostAction(props) {
       const data = useTurnData(props.sessionId)
       const turn = messageTurnOf(data, props.messageId)
-      const cost = turn === undefined ? null : turnCostOf(data, turn)
-      if (cost === null) return null
-      return h('span', { className: 'dum-turn-chip', 'data-dsh-usage-meter-turn-chip': String(turn) }, formatCny(cost))
+      const entry = turn === undefined ? undefined : turnEntryOf(data, turn)
+      const [open, setOpen] = React.useState(false)
+      const buttonRef = React.useRef(null)
+
+      React.useEffect(() => {
+        if (!open || entry === undefined) return undefined
+        if (typeof document === 'undefined' || typeof document.createElement !== 'function') return undefined
+        const anchor = buttonRef.current
+        if (anchor === null || anchor === undefined || typeof window === 'undefined') return undefined
+        const rows = [
+          ['turn.hit', entry.cacheHitCost],
+          ['turn.miss', entry.cacheMissCost],
+          ['turn.output', entry.outputCost],
+        ]
+        const node = document.createElement('div')
+        node.className = 'dum-turn-pop'
+        node.setAttribute('role', 'dialog')
+        node.setAttribute('aria-label', props.t === undefined ? 'Turn cost breakdown' : props.t('turn.popover'))
+        for (const [key, value] of rows) {
+          const row = document.createElement('div')
+          row.className = 'dum-turn-pop__row'
+          const label = document.createElement('span')
+          label.className = 'dum-turn-pop__label'
+          label.textContent = typeof props.t === 'function' ? props.t(key) : key
+          const amount = document.createElement('span')
+          amount.className = 'dum-turn-pop__value'
+          amount.textContent = formatCny(value)
+          row.append(label, amount)
+          node.append(row)
+        }
+        document.body.appendChild(node)
+        const owner = typeof anchor.closest === 'function' ? anchor.closest('[data-turn-tail]') : null
+        if (owner !== null) owner.setAttribute('data-dum-open', '')
+        const place = () => {
+          const rect = anchor.getBoundingClientRect()
+          const size = node.getBoundingClientRect()
+          const left = Math.max(8, Math.min(window.innerWidth - 8 - size.width, rect.right - size.width))
+          let top = rect.top - size.height - 8
+          if (top < 8) top = rect.bottom + 8
+          node.style.left = `${Math.round(left)}px`
+          node.style.top = `${Math.round(top)}px`
+        }
+        place()
+        const onPointerDown = (event) => {
+          if (event.target === anchor || (event.target !== null && node.contains(event.target))) return
+          setOpen(false)
+        }
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') setOpen(false)
+        }
+        document.addEventListener('pointerdown', onPointerDown, true)
+        document.addEventListener('keydown', onKeyDown)
+        window.addEventListener('resize', place)
+        window.addEventListener('scroll', place, true)
+        return () => {
+          node.remove()
+          if (owner !== null) owner.removeAttribute('data-dum-open')
+          document.removeEventListener('pointerdown', onPointerDown, true)
+          document.removeEventListener('keydown', onKeyDown)
+          window.removeEventListener('resize', place)
+          window.removeEventListener('scroll', place, true)
+        }
+      }, [open, entry === undefined ? '' : entry.cacheHitCost, entry === undefined ? '' : entry.cacheMissCost, entry === undefined ? '' : entry.outputCost, props.t])
+
+      if (entry === undefined) return null
+      return h('span', {
+        ref: buttonRef,
+        className: 'dum-turn-chip',
+        'data-dsh-usage-meter-turn-chip': String(turn),
+        role: 'button',
+        tabIndex: 0,
+        'aria-haspopup': 'dialog',
+        'aria-expanded': open,
+        onClick: () => setOpen((value) => !value),
+        onKeyDown: (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          setOpen((value) => !value)
+        },
+      }, formatCny(entry.cost))
     }
 
     function UsageStatusBar(props) {
