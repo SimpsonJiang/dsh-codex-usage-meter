@@ -129,13 +129,6 @@ function cleanNumber(value) {
   return Number.isFinite(value) && value > 0 ? (value < 1e-12 ? 0 : value) : 0
 }
 
-/** Keep two decimal places of a CNY amount, discarding the rest (no rounding). */
-export function truncateCost(value) {
-  const number = finiteNumber(value)
-  if (number === undefined || number <= 0) return 0
-  // `toFixed(6)` removes binary-float dust such as 0.29 * 100 = 28.999999…
-  return Math.floor(Number((number * 100).toFixed(6))) / 100
-}
 
 /** Keep two decimal places of a CNY amount, rounding half away from zero. */
 export function roundCost(value) {
@@ -686,15 +679,15 @@ export function sanitizeState(raw) {
   return state
 }
 
-/** Copy a totals-like bucket with money fields truncated and parts-consistent. */
-function truncateBucketCosts(bucket) {
+/** Copy a totals-like bucket with money fields rounded and parts-consistent. */
+function roundedBucketCosts(bucket) {
   if (!isRecord(bucket)) return bucket
-  const money = truncatedCostFields(bucket)
+  const money = presentedCostFields(bucket)
   return {
     ...bucket,
     ...money,
-    peakCost: truncateCost(bucket.peakCost),
-    offCost: truncateCost(bucket.offCost),
+    peakCost: roundCost(bucket.peakCost),
+    offCost: roundCost(bucket.offCost),
   }
 }
 
@@ -723,23 +716,23 @@ export function serializeState(state) {
     }
   }
   const mapBuckets = (collection) => Object.fromEntries(
-    Object.entries(collection).map(([key, bucket]) => [key, truncateBucketCosts(bucket)]),
+    Object.entries(collection).map(([key, bucket]) => [key, roundedBucketCosts(bucket)]),
   )
   return JSON.stringify({
     ...state,
-    total: truncateBucketCosts(state.total),
+    total: roundedBucketCosts(state.total),
     days: mapBuckets(state.days),
     models: mapBuckets(state.models),
     sessions: mapBuckets(state.sessions),
     slots,
-    last: state.last === null ? null : { ...state.last, cost: truncateCost(state.last.cost) },
+    last: state.last === null ? null : { ...state.last, cost: roundCost(state.last.cost) },
     aux: {
       requests: Math.max(0, Math.floor(finiteNumber(state.aux?.requests) ?? 0)),
-      cost: truncateCost(state.aux?.cost),
+      cost: roundCost(state.aux?.cost),
       tokens: Math.max(0, Math.floor(finiteNumber(state.aux?.tokens) ?? 0)),
       byPurpose: Object.fromEntries(
         Object.entries(isRecord(state.aux?.byPurpose) ? state.aux.byPurpose : {})
-          .map(([purpose, cost]) => [purpose, truncateCost(cost)]),
+          .map(([purpose, cost]) => [purpose, roundCost(cost)]),
       ),
       byPurposeRequests: Object.fromEntries(
         Object.entries(isRecord(state.aux?.byPurposeRequests) ? state.aux.byPurposeRequests : {})
@@ -751,7 +744,7 @@ export function serializeState(state) {
       ),
       log: Array.isArray(state.aux?.log) ? state.aux.log.slice(-25).map((entry) => ({
         ...entry,
-        cost: truncateCost(entry.cost),
+        cost: roundCost(entry.cost),
       })) : [],
     },
   })
@@ -929,10 +922,6 @@ function presentedCostFields(totals) {
   return costFields(totals, roundCost)
 }
 
-/** Persisted money: the last digit is discarded, keeping the file at cents. */
-function truncatedCostFields(totals) {
-  return costFields(totals, truncateCost)
-}
 
 function presentTotals(rawTotals, date) {
   const totals = sanitizeTotals(rawTotals)
@@ -1806,5 +1795,4 @@ export const __internals = {
   sanitizeState,
   serializeState,
   startOfLocalDay,
-  truncateCost,
 }

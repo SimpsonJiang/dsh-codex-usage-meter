@@ -34,7 +34,6 @@ const {
   sanitizeState,
   serializeState,
   startOfLocalDay,
-  truncateCost,
 } = __internals
 
 const BEIJING_OFFSET = 8 * 3_600_000
@@ -313,17 +312,19 @@ await test('the session fold splits cost into cache-hit, cache-miss and output',
   assert.equal(withoutMessage.cost, 0)
 })
 
-await test('money is truncated to cents, never rounded', () => {
-  assert.equal(truncateCost(26.089), 26.08)
-  assert.equal(truncateCost(1.239), 1.23)
-  assert.equal(truncateCost(0.0099), 0)
-  assert.equal(truncateCost(1.999), 1.99)
-  assert.equal(truncateCost(0), 0)
-  assert.equal(truncateCost(-3), 0)
-  assert.equal(truncateCost(undefined), 0)
+await test('money keeps two decimals in storage, rounding half-up like the display', () => {
+  assert.equal(roundCost(26.089), 26.09)
+  assert.equal(roundCost(1.239), 1.24)
+  assert.equal(roundCost(0.0099), 0.01)
+  assert.equal(roundCost(1.999), 2)
+  assert.equal(roundCost(0), 0)
+  assert.equal(roundCost(-3), 0)
+  assert.equal(roundCost(undefined), 0)
   // Binary-float dust must not lose a legitimate cent.
-  assert.equal(truncateCost(0.29), 0.29)
-  assert.equal(truncateCost(10.15), 10.15)
+  assert.equal(roundCost(0.29), 0.29)
+  assert.equal(roundCost(10.15), 10.15)
+  assert.equal(roundCost(1.005), 1.01)
+  assert.equal(roundCost(2.675), 2.68)
 
   const state = createState()
   state.total.cost = 1.239
@@ -332,11 +333,11 @@ await test('money is truncated to cents, never rounded', () => {
   state.sessions['s1'] = { ...createState().total, cost: 26.089, cacheHitCost: 25.999 }
   state.days['2026-11-08'] = { ...createState().total, cost: 1.239 }
   const disk = JSON.parse(serializeState(state))
-  assert.equal(disk.total.cost, 1.23)
-  assert.equal(disk.total.cacheHitCost, 0.08)
-  assert.equal(disk.sessions.s1.cost, 26.08)
-  assert.equal(disk.sessions.s1.cacheHitCost, 25.99)
-  assert.equal(disk.days['2026-11-08'].cost, 1.23)
+  assert.equal(disk.total.cost, 1.24)
+  assert.equal(disk.total.cacheHitCost, 0.09)
+  assert.equal(disk.sessions.s1.cost, 26.09)
+  assert.equal(disk.sessions.s1.cacheHitCost, 26)
+  assert.equal(disk.days['2026-11-08'].cost, 1.24)
 })
 
 await test('pricing mode: scheduled (default) honours the peak window, flat does not', async () => {
@@ -571,27 +572,23 @@ await test('rejects bad methods and invalid session ids', async () => {
   assert.equal(callRoute(summaryRoute, { url: '/dsh-usage-meter/summary?session=bad%2Fid' }).status, 400)
 })
 
-await test('persists truncated cents but displays rounded cents', async () => {
+await test('persists and displays the same rounded cents', async () => {
   const dir = await useFreshProfile()
   const at = Date.now() - 60_000
   const rawCost = (flashInputRate(at) * 1_235_900) / 1_000_000
-  const stored = truncateCost(rawCost)
-  const displayed = roundCost(rawCost)
-  assert.equal(roundCost(1.005), 1.01)
-  assert.equal(roundCost(2.675), 2.68)
-  assert.equal(truncateCost(1.239), 1.23)
+  const expected = roundCost(rawCost)
   const { emit, summary } = await mount({}, { backfill: false, flushMs: 250 })
   emit({ id: 'persist-session' }, requestHeaderEvent({ time: at }))
   emit({ id: 'persist-session' }, messageEvent({ turn: 1, step: 1, time: at, usage: { inputTokens: 1_235_900, outputTokens: 0 } }))
   await sleep(800)
   const raw = await readFile(join(dir, 'plugin-data', 'dsh-usage-meter', 'usage.json'), 'utf8')
   const saved = JSON.parse(raw)
-  assert.equal(saved.total.cost, stored)
+  assert.equal(saved.total.cost, expected)
   assert.equal(String(saved.total.cost).split('.')[1]?.length <= 2 || Number.isInteger(saved.total.cost), true, 'stored cost keeps at most two decimals')
   assert.equal(saved.total.requests, 1)
-  assert.equal(saved.days[localDateKey(at)].cost, stored)
-  assert.equal(saved.sessions['persist-session'].cost, stored)
-  assert.equal(summary().total.cost, displayed, 'the live payload rounds to cents')
+  assert.equal(saved.days[localDateKey(at)].cost, expected)
+  assert.equal(saved.sessions['persist-session'].cost, expected)
+  assert.equal(summary().total.cost, expected, 'the live payload rounds the same way')
 })
 
 await test('a pricing change rebuilds the retained history from session logs', async () => {
