@@ -578,12 +578,12 @@ window.__ModuleLoader__.load({
         '[data-turn-tail][data-dum-open] .actions{opacity:1 !important}',
         '.dum-turn-pop{position:fixed;z-index:1200;display:flex;flex-direction:column;gap:4px;',
         'min-width:176px;padding:8px 10px;border-radius:8px;pointer-events:auto;',
-        'background:var(--dsw-static-neutral-bluish-1000,#0f1115);color:#fff;',
-        'border:1px solid rgba(255,255,255,.14);box-shadow:0 6px 20px rgba(0,0,0,.32);',
+        'background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);',
+        'border:1px solid var(--dsw-alias-border-l2,#e6e6e6);box-shadow:0 6px 20px rgba(0,0,0,.22);',
         'font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}',
         '.dum-turn-pop__row{display:flex;align-items:baseline;justify-content:space-between;gap:18px;white-space:nowrap}',
-        '.dum-turn-pop__label{color:#b9bdc6}',
-        '.dum-turn-pop__value{color:#fff}',
+        '.dum-turn-pop__label{color:var(--dsw-alias-label-secondary,#5c5c5c)}',
+        '.dum-turn-pop__value{color:var(--dsw-alias-label-primary,#1a1a1a)}',
       ].join('')
       document.head.appendChild(style)
       return () => {
