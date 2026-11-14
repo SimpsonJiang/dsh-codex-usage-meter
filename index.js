@@ -31,6 +31,8 @@ export const name = 'dsh-usage-meter'
 export const ROUTE_PATH = '/dsh-usage-meter/summary'
 /** Statistics-page route. */
 export const STATS_PATH = '/dsh-usage-meter/stats'
+/** Per-Turn cost map for the Chat footer; computed lazily from the session log. */
+export const TURNS_PATH = '/dsh-usage-meter/turns'
 
 const PLUGIN_ID = 'dsh-usage-meter'
 const STATE_FILE = 'usage.json'
@@ -849,6 +851,68 @@ export function foldSessionTotals(events, inherited, config, cap) {
   return session
 }
 
+/**
+ * Fold one session log into per-Turn costs plus a durable message → Turn map.
+ * Mirrors `foldSessionTotals` (retry slot replacement, route tracking) so the
+ * sum of Turn costs equals the Session's settled main-call cost.
+ */
+export function foldTurnCosts(events, inherited, config, cap) {
+  const slots = new Map()
+  let route = { provider: '', model: '' }
+  const buckets = new Map()
+  const messages = new Map()
+  const list = Array.isArray(events) ? [...events] : []
+  list.sort((left, right) => (finiteNumber(left?.seq) ?? 0) - (finiteNumber(right?.seq) ?? 0))
+  for (const event of list) {
+    if (!isRecord(event) || typeof event.type !== 'string') continue
+    if ((finiteNumber(event?.seq) ?? 0) < inherited) continue
+    const time = finiteNumber(event.time) ?? 0
+    if (cap !== undefined && time >= cap) continue
+    if (event.type === 'turn/start' || event.type === 'turn/end') continue
+    if (event.type === 'request/header' || event.type === 'request/context') {
+      const next = routeOfEvent(event)
+      if (next !== undefined) route = next
+      continue
+    }
+    if (event.type === 'llm/retry-started') {
+      slots.delete(slotKey('', integerOf(event.data?.turn), integerOf(event.data?.step), event.seq))
+      continue
+    }
+    if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') continue
+    const rawUsage = usageOfEvent(event)
+    if (rawUsage === undefined) continue
+    const usage = readUsage(rawUsage)
+    if (usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens <= 0) continue
+    const turn = integerOf(event.data?.turn)
+    if (turn === undefined) continue
+    const key = slotKey('', turn, integerOf(event.data?.step), event.seq)
+    const previous = slots.get(key)
+    if (previous !== undefined) {
+      const previousBucket = buckets.get(turn)
+      if (previousBucket !== undefined) addToBucket(previousBucket, previous, -1)
+    }
+    const source = event.type === 'assistant/message' ? sourceOfMessage(event) : route
+    const contribution = makeContribution({ usage, provider: source.provider, model: source.model, time, config })
+    slots.set(key, contribution)
+    let bucket = buckets.get(turn)
+    if (bucket === undefined) {
+      bucket = emptyTotals()
+      buckets.set(turn, bucket)
+    }
+    addToBucket(bucket, contribution, 1)
+    if (event.type === 'assistant/message') {
+      const messageId = event?.data?.message?.id
+      if (typeof messageId === 'string' && messageId !== '') messages.set(messageId, turn)
+    }
+  }
+  const turns = []
+  for (const [turn, bucket] of [...buckets].sort((left, right) => left[0] - right[0])) {
+    if (bucket.requests <= 0 || bucket.cost <= 0) continue
+    turns.push({ turn, cost: roundCost(bucket.cost), totalTokens: totalTokensOf(bucket) })
+  }
+  return { turns, messages: Object.fromEntries(messages) }
+}
+
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
@@ -1183,6 +1247,8 @@ export function apply(ctx, rawConfig) {
   const routes = new Map()
   /** Open turn per session, for the longest-task duration. */
   const turnStarts = new Map()
+  /** Lazily folded per-Turn costs, dropped whenever the session log advances. */
+  const turnCache = new Map()
 
   const markDirty = () => {
     dirty = true
@@ -1327,6 +1393,7 @@ export function apply(ctx, rawConfig) {
 
   const onSessionEvent = (session, event) => {
     const sessionId = typeof session?.id === 'string' ? session.id : String(session?.id ?? '')
+    turnCache.delete(sessionId)
     if (!loaded || backfilling) {
       if (buffer.length < BUFFER_LIMIT) buffer.push([sessionId, event])
       return
@@ -1763,6 +1830,37 @@ export function apply(ctx, rawConfig) {
     }
   }
 
+  const handleTurns = async (request, response) => {
+    if (request.method !== 'GET') {
+      response.writeHead(405, { allow: 'GET', 'cache-control': 'no-store' })
+      response.end()
+      return
+    }
+    if (!requireLoaded(response)) return
+    try {
+      const session = requestUrl(request).searchParams.get('session')
+      if (session === null || !/^[A-Za-z0-9._:-]{1,200}$/.test(session)) {
+        sendJson(response, 400, { ok: false, error: 'invalid session id' })
+        return
+      }
+      const cached = turnCache.get(session)
+      let payload = cached !== undefined && Date.now() - cached.at < 1_500 ? cached.payload : undefined
+      if (payload === undefined) {
+        const snapshot = await readSessionLog({ header: { id: session } })
+        if (snapshot === undefined) {
+          sendJson(response, 404, { ok: false, error: 'session unavailable' })
+          return
+        }
+        const inherited = Math.max(0, integerOf(snapshot.inheritedEventCount) ?? 0)
+        payload = foldTurnCosts(snapshot.events, inherited, config)
+        turnCache.set(session, { at: Date.now(), payload })
+      }
+      sendJson(response, 200, { ok: true, session, turns: payload.turns, messages: payload.messages })
+    } catch (error) {
+      sendJson(response, 500, { ok: false, error: messageOf(error) })
+    }
+  }
+
   ctx.inject(['webServer'], (webCtx) => {
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: ROUTE_PATH, handler: handleSummary }),
@@ -1771,6 +1869,10 @@ export function apply(ctx, rawConfig) {
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: STATS_PATH, handler: handleStats }),
       'dsh-usage-meter: stats route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: TURNS_PATH, handler: handleTurns }),
+      'dsh-usage-meter: turns route',
     )
   })
 }
@@ -1784,6 +1886,7 @@ export const __internals = {
   costOf,
   createState,
   foldSessionTotals,
+  foldTurnCosts,
   isPeak,
   localDateKey,
   nextPeriodChange,

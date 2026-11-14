@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-usage-meter",
-  "version": "1.7.4",
+  "version": "1.8.0",
   "private": false,
   "license": "MIT",
   "description": "DeepSeek token usage and cost meter: a current-Session status bar plus a Codex-style global usage statistics page, priced with DeepSeek peak/off-peak rates.",

@@ -23,6 +23,7 @@ const {
   costOf,
   createState,
   foldSessionTotals,
+  foldTurnCosts,
   isPeak,
   localDateKey,
   nextPeriodChange,
@@ -116,6 +117,30 @@ function callRoute(route, { method = 'GET', url = '/' } = {}) {
   return { status, payload }
 }
 
+/** Invoke one async registered route; resolves after the response ends. */
+function callRouteAsync(route, { method = 'GET', url = '/' } = {}) {
+  return new Promise((resolve) => {
+    let status
+    let body = ''
+    const response = {
+      writeHead(nextStatus) {
+        status = nextStatus
+      },
+      end(chunk) {
+        if (chunk !== undefined && chunk !== null) body += String(chunk)
+        let payload
+        try {
+          payload = body === '' ? undefined : JSON.parse(body)
+        } catch {
+          payload = body
+        }
+        resolve({ status, payload })
+      },
+    }
+    void route.handler({ method, url }, response)
+  })
+}
+
 async function waitFor(condition, label, timeoutMs = 8_000) {
   const started = Date.now()
   for (;;) {
@@ -132,8 +157,10 @@ async function mount(services, config) {
   apply(fake.ctx, config)
   const summaryRoute = fake.routes.get('/dsh-usage-meter/summary')
   const statsRoute = fake.routes.get('/dsh-usage-meter/stats')
+  const turnsRoute = fake.routes.get('/dsh-usage-meter/turns')
   assert.equal(summaryRoute !== undefined, true, 'summary route registered')
   assert.equal(statsRoute !== undefined, true, 'stats route registered')
+  assert.equal(turnsRoute !== undefined, true, 'turns route registered')
   await waitFor(() => {
     const result = callRoute(summaryRoute)
     return result.payload?.ok === true
@@ -142,6 +169,7 @@ async function mount(services, config) {
     ...fake,
     summaryRoute,
     statsRoute,
+    turnsRoute,
     emit: (session, event) => fake.listeners.get('session/event')(session, event),
     /** Drive the registered llm/stream waterfall listener with a fake chunk stream. */
     callLlmStream: async (options, chunks) => {
@@ -168,7 +196,7 @@ function requestHeaderEvent({ time, model = 'deepseek-flash', provider = 'deepse
   }
 }
 
-function messageEvent({ turn, step, time, usage, model = 'deepseek-flash', provider = 'deepseek-official', seq = 1 }) {
+function messageEvent({ turn, step, time, usage, model = 'deepseek-flash', provider = 'deepseek-official', seq = 1, messageId }) {
   return {
     type: 'assistant/message',
     seq,
@@ -176,7 +204,7 @@ function messageEvent({ turn, step, time, usage, model = 'deepseek-flash', provi
     data: {
       turn,
       step,
-      message: { role: 'assistant', source: { kind: 'model', provider, model } },
+      message: { role: 'assistant', ...(typeof messageId === 'string' ? { id: messageId } : {}), source: { kind: 'model', provider, model } },
       usage,
       stream: [],
     },
@@ -310,6 +338,30 @@ await test('the session fold splits cost into cache-hit, cache-miss and output',
   // Events at or after the live cutoff are excluded.
   const withoutMessage = foldSessionTotals(events, 0, config, at)
   assert.equal(withoutMessage.cost, 0)
+})
+
+await test('folds per-turn costs and maps durable messages to their turn', () => {
+  const at = Date.now() - 60_000
+  const rate = flashInputRate(at)
+  const events = [
+    requestHeaderEvent({ time: at, seq: 1 }),
+    messageEvent({ turn: 1, step: 1, time: at, usage: { inputTokens: 1_000_000, outputTokens: 0 }, messageId: 'm1', seq: 2 }),
+    messageEvent({ turn: 1, step: 2, time: at + 1_000, usage: { inputTokens: 500_000, outputTokens: 100_000 }, messageId: 'm2', seq: 3 }),
+    messageEvent({ turn: 2, step: 1, time: at + 2_000, usage: { inputTokens: 2_000_000, outputTokens: 0 }, messageId: 'm3', seq: 4 }),
+  ]
+  const config = resolveConfig({})
+  const folded = foldTurnCosts(events, 0, config)
+  assert.deepEqual(folded.turns.map((entry) => entry.turn), [1, 2])
+  const expectedTurn1 = roundCost((1_500_000 * rate + 100_000 * rate * 4) / 1_000_000)
+  const expectedTurn2 = roundCost((2_000_000 * rate) / 1_000_000)
+  assert.equal(folded.turns[0].cost, expectedTurn1)
+  assert.equal(folded.turns[1].cost, expectedTurn2)
+  assert.equal(folded.messages.m1, 1)
+  assert.equal(folded.messages.m2, 1)
+  assert.equal(folded.messages.m3, 2)
+  // The cutoff excludes a turn still in flight.
+  const withoutSecond = foldTurnCosts(events, 0, config, at + 2_000)
+  assert.deepEqual(withoutSecond.turns.map((entry) => entry.turn), [1])
 })
 
 await test('money keeps two decimals in storage, rounding half-up like the display', () => {
@@ -562,6 +614,36 @@ await test('stats route serves the page payload', async () => {
   assert.equal(payload.days[payload.days.length - 1].tokens, 2_000_000)
   assert.equal(payload.models.length, 1)
   assert.equal(payload.models[0].model, 'deepseek-flash')
+})
+
+await test('turns route serves per-turn costs for one session', async () => {
+  await useFreshProfile()
+  const at = Date.now() - 60_000
+  const rate = flashInputRate(at)
+  const events = [
+    requestHeaderEvent({ time: at, seq: 1 }),
+    messageEvent({ turn: 1, step: 1, time: at, usage: { inputTokens: 1_000_000, outputTokens: 0 }, messageId: 'm1', seq: 2 }),
+    messageEvent({ turn: 2, step: 1, time: at + 1_000, usage: { inputTokens: 2_000_000, outputTokens: 0 }, messageId: 'm2', seq: 3 }),
+  ]
+  const services = {
+    sessionQuery: {
+      async readSession() {
+        return { session: { id: 'session-x' }, inheritedEventCount: 0, events }
+      },
+    },
+  }
+  const mounted = await mount(services, { backfill: false })
+  const result = await callRouteAsync(mounted.turnsRoute, { url: '/dsh-usage-meter/turns?session=session-x' })
+  assert.equal(result.status, 200)
+  assert.equal(result.payload.ok, true)
+  assert.equal(result.payload.session, 'session-x')
+  assert.deepEqual(result.payload.turns.map((entry) => entry.turn), [1, 2])
+  assert.equal(result.payload.turns[0].cost, roundCost(rate))
+  assert.equal(result.payload.turns[1].cost, roundCost(2 * rate))
+  assert.equal(result.payload.messages.m1, 1)
+  assert.equal(result.payload.messages.m2, 2)
+  const invalid = await callRouteAsync(mounted.turnsRoute, { url: '/dsh-usage-meter/turns?session=bad%2Fid' })
+  assert.equal(invalid.status, 400)
 })
 
 await test('rejects bad methods and invalid session ids', async () => {

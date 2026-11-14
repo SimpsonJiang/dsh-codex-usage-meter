@@ -27,6 +27,7 @@ window.__ModuleLoader__.load({
     /** Host routes, resolved against the page base so reverse-proxy prefixes survive. */
     const SUMMARY_ROUTE = 'dsh-usage-meter/summary'
     const STATS_ROUTE = 'dsh-usage-meter/stats'
+    const TURNS_ROUTE = 'dsh-usage-meter/turns'
 
     const DEFAULT_POLL_MS = 5_000
     const ERROR_POLL_MS = 15_000
@@ -297,6 +298,13 @@ window.__ModuleLoader__.load({
       '.dum-model__cost{flex:none;min-width:76px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}',
       '.dum-models__empty{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8a8a);padding:8px 0 2px}',
       '@media (max-width:640px){.dum-model__meta{display:none}}',
+      '.dum-turn-cost{display:flex;justify-content:flex-end;padding:0 2px;',
+      'color:var(--dsw-alias-label-tertiary,#8a8a8a);font-size:12px;line-height:18px;',
+      'font-variant-numeric:tabular-nums;user-select:none}',
+      '.dum-turn-chip{display:inline-flex;align-items:center;height:20px;padding:0 6px;',
+      'border-radius:6px;color:var(--dsw-alias-label-secondary,#5c5c5c);',
+      'background:color-mix(in srgb,var(--dsw-alias-label-secondary,#5c5c5c) 8%,transparent);',
+      'font-size:12px;line-height:18px;font-variant-numeric:tabular-nums;user-select:none}',
     ].join('')
 
     // -----------------------------------------------------------------------
@@ -464,8 +472,7 @@ window.__ModuleLoader__.load({
     }
 
     /** Load the statistics page payload once; the page refreshes on demand. */
-    function useStatsData() {
-      const [state, setState] = React.useState({ status: 'loading', data: null, error: null, fetching: false })
+    function useStatsData() {      const [state, setState] = React.useState({ status: 'loading', data: null, error: null, fetching: false })
       const [tick, setTick] = React.useState(0)
       React.useEffect(() => {
         let disposed = false
@@ -493,6 +500,61 @@ window.__ModuleLoader__.load({
       }, [tick])
       const refresh = () => setTick((value) => value + 1)
       return [state, refresh]
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-Turn cost
+    // -----------------------------------------------------------------------
+
+    /** Short-lived per-Session cache; every turn footer mount revalidates it. */
+    const turnDataCache = new Map()
+
+    async function loadTurnData(sessionId) {
+      const cached = turnDataCache.get(sessionId)
+      if (cached !== undefined && Date.now() - cached.at < 1_500) return cached.data
+      const data = await fetchJson(endpointPath(TURNS_ROUTE, `session=${encodeURIComponent(sessionId)}`))
+      turnDataCache.set(sessionId, { at: Date.now(), data })
+      return data
+    }
+
+    /** Folded Turn costs for the Session in the current Chat view. */
+    function useTurnData(sessionId) {
+      const [data, setData] = React.useState(() => {
+        const cached = typeof sessionId === 'string' ? turnDataCache.get(sessionId) : undefined
+        return cached === undefined ? null : cached.data
+      })
+      React.useEffect(() => {
+        if (typeof sessionId !== 'string' || sessionId === '') return undefined
+        let disposed = false
+        void (async () => {
+          try {
+            const next = await loadTurnData(sessionId)
+            if (!disposed) setData(next)
+          } catch {
+            // A missing log only hides the per-Turn reading.
+          }
+        })()
+        return () => {
+          disposed = true
+        }
+      }, [sessionId])
+      return data
+    }
+
+    function turnCostOf(data, turn) {
+      if (data === null || typeof data !== 'object' || !Array.isArray(data.turns)) return null
+      for (const entry of data.turns) {
+        if (entry !== null && typeof entry === 'object' && entry.turn === turn) {
+          return numberOrZero(entry.cost)
+        }
+      }
+      return null
+    }
+
+    function messageTurnOf(data, messageId) {
+      if (data === null || typeof data !== 'object' || data.messages === null || typeof data.messages !== 'object') return undefined
+      const turn = data.messages[messageId]
+      return typeof turn === 'number' && Number.isFinite(turn) ? turn : undefined
     }
 
     // -----------------------------------------------------------------------
@@ -677,6 +739,24 @@ window.__ModuleLoader__.load({
       }
       lines.push(t('bar.tipHint'))
       return lines.join('\n')
+    }
+
+    /** Bare `¥x.xx` for one completed Turn, registered in `conversation.chat.turnTail`. */
+    function TurnCostTail(props) {
+      const data = useTurnData(props.sessionId)
+      const turn = props.turn !== null && typeof props.turn === 'object' ? props.turn.turn : undefined
+      const cost = typeof turn === 'number' ? turnCostOf(data, turn) : null
+      if (cost === null) return null
+      return h('div', { className: 'dum-turn-cost', 'data-dsh-usage-meter-turn': String(turn) }, formatCny(cost))
+    }
+
+    /** The same reading as a compact chip in the Turn footer's action row. */
+    function TurnCostAction(props) {
+      const data = useTurnData(props.sessionId)
+      const turn = messageTurnOf(data, props.messageId)
+      const cost = turn === undefined ? null : turnCostOf(data, turn)
+      if (cost === null) return null
+      return h('span', { className: 'dum-turn-chip', 'data-dsh-usage-meter-turn-chip': String(turn) }, formatCny(cost))
     }
 
     function UsageStatusBar(props) {
@@ -1011,6 +1091,14 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('shell.bottom', () => ctx.slots.register(
           { name: 'shell.bottom', locale: NS, inject: () => ({ openStats }) },
           UsageStatusBar,
+        ))
+        ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register(
+          { name: 'conversation.chat.turnTail', id: 'dsh-usage-meter-turn', order: 20, locale: NS },
+          TurnCostTail,
+        ))
+        ctx.slots.inject('conversation.chat.assistant-actions', () => ctx.slots.register(
+          { name: 'conversation.chat.assistant-actions', id: 'dsh-usage-meter-turn', order: 20, locale: NS },
+          TurnCostAction,
         ))
       },
     }

@@ -76,6 +76,7 @@ DeepSeek 官方列表价（元 / 百万 token，价格页更新于 2026-09-10）
 - 状态持久化在 `<profile>/plugin-data/dsh-usage-meter/usage.json`：全局累计、按日、按模型、按 Session 汇总、最长 Turn 时长和已结算的 step 槽位。
 - `GET /dsh-usage-meter/summary[?session=<id>]`：状态栏数据（带 `session` 时附该会话汇总）。
 - `GET /dsh-usage-meter/stats`：统计页数据（KPI、371 天零填充日序列、模型汇总、回填状态）。
+- **每轮对话费用**：Chat 中每个已完成 Turn 的 footer 显示本轮总花费（`¥x.xx`，命中 + 未命中 + 输出合计），数据来自新路由 `GET /dsh-usage-meter/turns?session=<id>`（按会话日志实时折算，含重试去重）。
 - **历史回填**：首次安装回放启动前已落盘的全部会话（忽略 fork 继承事件，避免重复计费）；从旧版本升级时按「已覆盖窗口」补齐（v1 状态补全量历史，v2 状态补安装前当天的小时窗），并在升级后按日志重放一次**按会话对账**，修正旧版本没有按会话汇总导致的偏差。回填在后台进行、有时限，超时标记 `partial`，页面注脚会显示状态。
 - 会话维度只统计该 Session **自身**的结算（fork/子代理继承来的历史不计入子会话）。
 
