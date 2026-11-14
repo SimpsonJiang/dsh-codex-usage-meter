@@ -137,6 +137,14 @@ export function truncateCost(value) {
   return Math.floor(Number((number * 100).toFixed(6))) / 100
 }
 
+/** Keep two decimal places of a CNY amount, rounding half away from zero. */
+export function roundCost(value) {
+  const number = finiteNumber(value)
+  if (number === undefined || number <= 0) return 0
+  // `toFixed(6)` first so 1.005 rounds up instead of down from float dust.
+  return Math.round(Number((number * 100).toFixed(6))) / 100
+}
+
 // ---------------------------------------------------------------------------
 // Time: Beijing billing period and local calendar days
 // ---------------------------------------------------------------------------
@@ -681,7 +689,7 @@ export function sanitizeState(raw) {
 /** Copy a totals-like bucket with money fields truncated and parts-consistent. */
 function truncateBucketCosts(bucket) {
   if (!isRecord(bucket)) return bucket
-  const money = presentedCostFields(bucket)
+  const money = truncatedCostFields(bucket)
   return {
     ...bucket,
     ...money,
@@ -895,14 +903,14 @@ function totalTokensOf(bucket) {
 }
 
 /**
- * Present a bucket's money fields: each component and the total are truncated
- * to cents, and the total is the sum of the truncated components so the status
- * bar's four readings always add up.
+ * Present a bucket's money fields to two decimals with the given converter.
+ * The total is the sum of the converted components so the status bar's four
+ * readings always add up.
  */
-function presentedCostFields(totals) {
-  const cacheHitCost = truncateCost(totals.cacheHitCost)
-  const cacheMissCost = truncateCost(totals.cacheMissCost)
-  const outputCost = truncateCost(totals.outputCost)
+function costFields(totals, convert) {
+  const cacheHitCost = convert(totals.cacheHitCost)
+  const cacheMissCost = convert(totals.cacheMissCost)
+  const outputCost = convert(totals.outputCost)
   const rawCost = finiteNumber(totals.cost) ?? 0
   const rawParts = (finiteNumber(totals.cacheHitCost) ?? 0)
     + (finiteNumber(totals.cacheMissCost) ?? 0)
@@ -912,8 +920,18 @@ function presentedCostFields(totals) {
   const partsConsistent = rawParts > 0 && Math.abs(rawParts - rawCost) <= Math.max(0.005, Math.abs(rawCost) * 1e-9)
   const cost = partsConsistent
     ? Number((cacheHitCost + cacheMissCost + outputCost).toFixed(2))
-    : truncateCost(rawCost)
+    : convert(rawCost)
   return { cost, cacheHitCost, cacheMissCost, outputCost }
+}
+
+/** Displayed money: rounded half-up to cents. */
+function presentedCostFields(totals) {
+  return costFields(totals, roundCost)
+}
+
+/** Persisted money: the last digit is discarded, keeping the file at cents. */
+function truncatedCostFields(totals) {
+  return costFields(totals, truncateCost)
 }
 
 function presentTotals(rawTotals, date) {
@@ -926,8 +944,8 @@ function presentTotals(rawTotals, date) {
     cacheHitCost: money.cacheHitCost,
     cacheMissCost: money.cacheMissCost,
     outputCost: money.outputCost,
-    peakCost: truncateCost(totals.peakCost),
-    offCost: truncateCost(totals.offCost),
+    peakCost: roundCost(totals.peakCost),
+    offCost: roundCost(totals.offCost),
     totalTokens,
     effectiveRate: totalTokens > 0 ? round((totals.cost * 1_000_000) / totalTokens, 4) : 0,
   }
@@ -946,8 +964,8 @@ function presentModels(state) {
         cacheHitCost: money.cacheHitCost,
         cacheMissCost: money.cacheMissCost,
         outputCost: money.outputCost,
-        peakCost: truncateCost(totals.peakCost),
-        offCost: truncateCost(totals.offCost),
+        peakCost: roundCost(totals.peakCost),
+        offCost: roundCost(totals.offCost),
         requests: totals.requests,
         totalTokens: totalTokensOf(totals),
         estimated: rawTotals.estimated === true,
@@ -1053,7 +1071,7 @@ export function buildSnapshot(state, config, now, sessionId) {
       model: state.last.model,
       provider: state.last.provider,
       peak: state.last.peak,
-      cost: truncateCost(state.last.cost),
+      cost: roundCost(state.last.cost),
       estimated: state.last.estimated,
     },
     trackingSince: state.trackingSince,
@@ -1082,7 +1100,7 @@ export function buildStats(state, config, now) {
     days.push({
       date: key,
       tokens: totalTokensOf(bucket),
-      cost: truncateCost(finiteNumber(bucket?.cost) ?? 0),
+      cost: roundCost(finiteNumber(bucket?.cost) ?? 0),
       requests: finiteNumber(bucket?.requests) ?? 0,
     })
   }
@@ -1119,11 +1137,11 @@ export function buildStats(state, config, now) {
     models: presentModels(state),
     auxCalls: {
       requests: Math.max(0, Math.floor(finiteNumber(state.aux?.requests) ?? 0)),
-      cost: truncateCost(state.aux?.cost),
+      cost: roundCost(state.aux?.cost),
       tokens: Math.max(0, Math.floor(finiteNumber(state.aux?.tokens) ?? 0)),
       byPurpose: Object.fromEntries(
         Object.entries(isRecord(state.aux?.byPurpose) ? state.aux.byPurpose : {})
-          .map(([purpose, cost]) => [purpose, truncateCost(cost)]),
+          .map(([purpose, cost]) => [purpose, roundCost(cost)]),
       ),
       byPurposeRequests: Object.fromEntries(
         Object.entries(isRecord(state.aux?.byPurposeRequests) ? state.aux.byPurposeRequests : {})
@@ -1142,7 +1160,7 @@ export function buildStats(state, config, now) {
         inputTokens: entry.inputTokens,
         cacheReadTokens: entry.cacheReadTokens,
         outputTokens: entry.outputTokens,
-        cost: truncateCost(entry.cost),
+        cost: roundCost(entry.cost),
       })) : [],
     },
     pricing: {
@@ -1784,6 +1802,7 @@ export const __internals = {
   readUsage,
   resolveConfig,
   resolvePrice,
+  roundCost,
   sanitizeState,
   serializeState,
   startOfLocalDay,

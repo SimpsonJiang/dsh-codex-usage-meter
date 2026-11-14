@@ -27,6 +27,7 @@ const {
   localDateKey,
   nextPeriodChange,
   pricingSignature,
+  roundCost,
   pruneState,
   resolveConfig,
   resolvePrice,
@@ -570,22 +571,27 @@ await test('rejects bad methods and invalid session ids', async () => {
   assert.equal(callRoute(summaryRoute, { url: '/dsh-usage-meter/summary?session=bad%2Fid' }).status, 400)
 })
 
-await test('persists the aggregate atomically with costs truncated to cents', async () => {
+await test('persists truncated cents but displays rounded cents', async () => {
   const dir = await useFreshProfile()
   const at = Date.now() - 60_000
-  const expected = truncateCost((flashInputRate(at) * 1_234_567) / 1_000_000)
+  const rawCost = (flashInputRate(at) * 1_235_900) / 1_000_000
+  const stored = truncateCost(rawCost)
+  const displayed = roundCost(rawCost)
+  assert.equal(roundCost(1.005), 1.01)
+  assert.equal(roundCost(2.675), 2.68)
+  assert.equal(truncateCost(1.239), 1.23)
   const { emit, summary } = await mount({}, { backfill: false, flushMs: 250 })
   emit({ id: 'persist-session' }, requestHeaderEvent({ time: at }))
-  emit({ id: 'persist-session' }, messageEvent({ turn: 1, step: 1, time: at, usage: { inputTokens: 1_234_567, outputTokens: 0 } }))
+  emit({ id: 'persist-session' }, messageEvent({ turn: 1, step: 1, time: at, usage: { inputTokens: 1_235_900, outputTokens: 0 } }))
   await sleep(800)
   const raw = await readFile(join(dir, 'plugin-data', 'dsh-usage-meter', 'usage.json'), 'utf8')
   const saved = JSON.parse(raw)
-  assert.equal(saved.total.cost, expected)
+  assert.equal(saved.total.cost, stored)
   assert.equal(String(saved.total.cost).split('.')[1]?.length <= 2 || Number.isInteger(saved.total.cost), true, 'stored cost keeps at most two decimals')
   assert.equal(saved.total.requests, 1)
-  assert.equal(saved.days[localDateKey(at)].cost, expected)
-  assert.equal(saved.sessions['persist-session'].cost, expected)
-  assert.equal(summary().total.cost, expected, 'the live payload is truncated the same way')
+  assert.equal(saved.days[localDateKey(at)].cost, stored)
+  assert.equal(saved.sessions['persist-session'].cost, stored)
+  assert.equal(summary().total.cost, displayed, 'the live payload rounds to cents')
 })
 
 await test('a pricing change rebuilds the retained history from session logs', async () => {
