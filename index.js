@@ -455,7 +455,7 @@ export function createState() {
     sessions: {},
     slots: {},
     last: null,
-    aux: { requests: 0, cost: 0, tokens: 0, byPurpose: {}, byPurposeRequests: {}, byPurposeTokens: {}, log: [], unbilled: { requests: 0, byPurpose: {}, log: [] } },
+    aux: { requests: 0, cost: 0, tokens: 0, byPurpose: {}, byPurposeRequests: {}, byPurposeTokens: {}, log: [] },
     backfill: { state: 'pending' },
     sessionReconcile: { state: 'pending' },
   }
@@ -666,26 +666,6 @@ export function sanitizeState(raw) {
         })
       }
     }
-    const unbilled = { requests: 0, byPurpose: {}, log: [] }
-    if (isRecord(raw.aux.unbilled)) {
-      unbilled.requests = Math.max(0, Math.floor(finiteNumber(raw.aux.unbilled.requests) ?? 0))
-      if (isRecord(raw.aux.unbilled.byPurpose)) {
-        for (const [purpose, count] of Object.entries(raw.aux.unbilled.byPurpose)) {
-          if (typeof purpose !== 'string' || purpose === '' || purpose.length > 80) continue
-          unbilled.byPurpose[purpose] = Math.max(0, Math.floor(finiteNumber(count) ?? 0))
-        }
-      }
-      if (Array.isArray(raw.aux.unbilled.log)) {
-        for (const entry of raw.aux.unbilled.log.slice(-25)) {
-          if (!isRecord(entry) || typeof entry.purpose !== 'string') continue
-          unbilled.log.push({
-            time: finiteNumber(entry.time) ?? 0,
-            purpose: entry.purpose.slice(0, 80),
-            sessionId: typeof entry.sessionId === 'string' ? entry.sessionId : '',
-          })
-        }
-      }
-    }
     state.aux = {
       requests: Math.max(0, Math.floor(finiteNumber(raw.aux.requests) ?? 0)),
       cost: nonNegative(raw.aux.cost) ?? 0,
@@ -694,7 +674,6 @@ export function sanitizeState(raw) {
       byPurposeRequests,
       byPurposeTokens,
       log,
-      unbilled,
     }
   }
   return state
@@ -767,21 +746,6 @@ export function serializeState(state) {
         ...entry,
         cost: roundCost(entry.cost),
       })) : [],
-      unbilled: (() => {
-        const source = isRecord(state.aux?.unbilled) ? state.aux.unbilled : {}
-        return {
-          requests: Math.max(0, Math.floor(finiteNumber(source.requests) ?? 0)),
-          byPurpose: Object.fromEntries(
-            Object.entries(isRecord(source.byPurpose) ? source.byPurpose : {})
-              .map(([purpose, count]) => [purpose, Math.max(0, Math.floor(finiteNumber(count) ?? 0))]),
-          ),
-          log: Array.isArray(source.log) ? source.log.slice(-25).map((entry) => ({
-            time: entry.time,
-            purpose: entry.purpose,
-            sessionId: entry.sessionId,
-          })) : [],
-        }
-      })(),
     },
   })
 }
@@ -1187,21 +1151,6 @@ export function buildStats(state, config, now) {
         outputTokens: entry.outputTokens,
         cost: roundCost(entry.cost),
       })) : [],
-      unbilled: (() => {
-        const source = isRecord(state.aux?.unbilled) ? state.aux.unbilled : {}
-        return {
-          requests: Math.max(0, Math.floor(finiteNumber(source.requests) ?? 0)),
-          byPurpose: Object.fromEntries(
-            Object.entries(isRecord(source.byPurpose) ? source.byPurpose : {})
-              .map(([purpose, count]) => [purpose, Math.max(0, Math.floor(finiteNumber(count) ?? 0))]),
-          ),
-          recent: Array.isArray(source.log) ? source.log.slice(-25).map((entry) => ({
-            time: entry.time,
-            purpose: entry.purpose,
-            sessionId: entry.sessionId,
-          })) : [],
-        }
-      })(),
     },
     pricing: {
       currency: 'CNY',
@@ -1639,27 +1588,6 @@ export function apply(ctx, rawConfig) {
     state.updatedAt = Date.now()
     markDirty()
   }
-  /**
-   * A purposeful call that ended without a usage chunk: the consumer aborted
-   * the stream (composer-prediction aborts the previous request on every new
-   * pause; auto-review can be interrupted by an interrupt) or the provider
-   * failed. The platform may still have billed the prefill, so count the call
-   * even though its token usage is unknowable here.
-   */
-  const recordAuxUnbilled = ({ time, purpose, sessionId }) => {
-    if (!isRecord(state.aux)) state = createState()
-    if (!isRecord(state.aux.unbilled)) state.aux.unbilled = { requests: 0, byPurpose: {}, log: [] }
-    const unbilled = state.aux.unbilled
-    unbilled.requests = Math.max(0, Math.floor(finiteNumber(unbilled.requests) ?? 0)) + 1
-    if (!isRecord(unbilled.byPurpose)) unbilled.byPurpose = {}
-    unbilled.byPurpose[purpose] = (Math.max(0, Math.floor(finiteNumber(unbilled.byPurpose[purpose]) ?? 0)) + 1)
-    if (!Array.isArray(unbilled.log)) unbilled.log = []
-    unbilled.log.push({ time, purpose, sessionId: sessionId ?? '' })
-    if (unbilled.log.length > 25) unbilled.log.splice(0, unbilled.log.length - 25)
-    state.revision += 1
-    state.updatedAt = Date.now()
-    markDirty()
-  }
   ctx.on('llm/stream', (options, next) => {
     const stream = next()
     const purpose = typeof options?.purpose === 'string' ? options.purpose.trim() : ''
@@ -1682,11 +1610,9 @@ export function apply(ctx, rawConfig) {
         }
       } finally {
         try {
-          if (loaded) {
-            if (entry.usage !== undefined) recordAuxUsage(entry)
-            else recordAuxUnbilled(entry)
-          } else {
-            auxBuffer.push(entry)
+          if (entry.usage !== undefined) {
+            if (loaded) recordAuxUsage(entry)
+            else auxBuffer.push(entry)
           }
         } catch (error) {
           // Never let metering break a provider call.
@@ -1716,7 +1642,6 @@ export function apply(ctx, rawConfig) {
       const queuedAux = auxBuffer.splice(0)
       for (const entry of queuedAux) {
         if (entry.usage !== undefined) recordAuxUsage(entry)
-        else recordAuxUnbilled(entry)
       }
       void persist()
     }

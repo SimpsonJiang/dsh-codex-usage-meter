@@ -67,7 +67,6 @@ window.__ModuleLoader__.load({
         'page.retry': '重试',
         'page.trackedSince': '统计自 {time}',
         'page.auxCalls': '含辅助模型调用 {count} 次（{cost}）',
-  'page.unbilled': '另有 {count} 次调用被中断、未返回 usage（未计入）',
 
         'kpi.totalTokens': '累计 Token 数',
         'kpi.totalCost': '累计费用',
@@ -139,7 +138,6 @@ window.__ModuleLoader__.load({
         'page.retry': 'Retry',
         'page.trackedSince': 'Tracked since {time}',
         'page.auxCalls': 'Includes {count} auxiliary model calls ({cost})',
-  'page.unbilled': '{count} interrupted calls returned no usage (not counted)',
 
         'kpi.totalTokens': 'Total tokens',
         'kpi.totalCost': 'Total cost',
@@ -942,7 +940,6 @@ window.__ModuleLoader__.load({
         const models = Array.isArray(data.models) ? data.models : []
         const auxCalls = data.auxCalls ?? {}
         const auxCount = numberOrZero(auxCalls.requests)
-        const unbilledCount = numberOrZero(auxCalls.unbilled?.requests)
         body = h(
           React.Fragment,
           null,
@@ -974,10 +971,6 @@ window.__ModuleLoader__.load({
             auxCount > 0 ? h('span', null, '·') : null,
             auxCount > 0
               ? h('span', null, t('page.auxCalls', { count: auxCount, cost: formatCny(auxCalls.cost) }))
-              : null,
-            unbilledCount > 0 ? h('span', null, '·') : null,
-            unbilledCount > 0
-              ? h('span', null, t('page.unbilled', { count: unbilledCount }))
               : null),
         )
       }
