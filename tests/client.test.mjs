@@ -460,7 +460,8 @@ assert.equal(modelRows.length, 2)
 // The heatmap owns its styled bubble: no native `title` tooltip may double it.
 for (const cell of heatCells.slice(0, 7)) assert.equal(cell.props.title, undefined, 'no native browser tooltip on heat cells')
 const styleNode = findAll(pageTree, (element) => element.type === 'style')[0]
-assert.equal(styleNode.children[0].includes('--dsw-static-blue-600'), true, 'heat cells use the blue scale')
+assert.equal(styleNode.children[0].includes('--dsw-alias-brand-primary'), true, 'heat cells derive from the theme brand color')
+assert.equal(styleNode.children[0].includes('color-mix(in srgb,var(--dsw-alias-brand-primary'), true, 'heat levels mix with the surface for dark-mode contrast')
 assert.equal(styleNode.children[0].includes('--dsw-static-neutral-bluish-1000'), true, 'hover bubble is black')
 
 function heatCellsOf(tree) {
