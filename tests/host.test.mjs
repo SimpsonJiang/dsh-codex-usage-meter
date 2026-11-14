@@ -692,9 +692,22 @@ await test('bills purposeful llm/stream calls without double counting the agent 
   assert.equal(statsPayload.auxCalls.recent.length, 1)
   assert.equal(statsPayload.auxCalls.recent[0].purpose, 'auto-review')
   assert.equal(statsPayload.auxCalls.recent[0].sessionId, 'aux-session')
+
+  // A purposeful stream that is aborted before its usage chunk is counted as
+  // unbilled (the platform may still charge the prefill).
+  await callLlmStream(
+    { provider: 'deepseek-official', model: 'deepseek-flash', sessionId: 'aux-session', purpose: 'composer-prediction' },
+    [{ type: 'text-delta', text: 'hel' }],
+  )
+  const afterAbort = stats()
+  assert.equal(afterAbort.auxCalls.unbilled.requests, 1)
+  assert.equal(afterAbort.auxCalls.unbilled.byPurpose['composer-prediction'], 1)
+  assert.equal(afterAbort.auxCalls.unbilled.recent.length, 1)
+  assert.equal(afterAbort.auxCalls.unbilled.recent[0].purpose, 'composer-prediction')
   await sleep(700)
   const saved = JSON.parse(await readFile(join(dir, 'plugin-data', 'dsh-usage-meter', 'usage.json'), 'utf8'))
   assert.equal(saved.aux.requests, 1)
+  assert.equal(saved.aux.unbilled.requests, 1)
 })
 
 // ---------------------------------------------------------------------------

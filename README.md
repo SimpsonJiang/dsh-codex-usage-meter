@@ -14,7 +14,7 @@ DeepSeek Harness 插件：统计 provider 上报的 Token 用量，按 DeepSeek 
   - `每周`：**柱状图（用热力格绘制）**——每列是一周，同一周自下而上堆叠蓝色格子，柱高 = 该周用量；整列都可悬停，没有用量的周显示「{周一起始日期} 起的一周 + 0 个 Token」；
   - `累计总量`：同样的柱状图，柱高 = 截至该周的累计用量（只增不减）；悬停显示「累计至 {周一起始日期} 起的一周 + 累计值」。
 
-计费与统计都不产生模型请求、不联网：Host 半只折叠 Session 日志里已经提交的 `assistant/message` / `assistant/attempt` 结算，以及 `turn/start` → `turn/end` 边界；同时拦截 `llm/stream` waterfall，把 **auto-review 等辅助模型调用**的 usage 按 session 计入（这类调用不会写 `assistant/message`，但同样产生 DeepSeek 费用）。页面注脚会显示「含辅助模型调用 N 次（¥…）」。
+计费与统计都不产生模型请求、不联网：Host 半只折叠 Session 日志里已经提交的 `assistant/message` / `assistant/attempt` 结算，以及 `turn/start` → `turn/end` 边界；同时拦截 `llm/stream` waterfall，把 **auto-review 等辅助模型调用**的 usage 按 session 计入（这类调用不会写 `assistant/message`，但同样产生 DeepSeek 费用）。页面注脚会显示「含辅助模型调用 N 次（¥…）」；被中断、未返回 usage 的辅助调用（例如 composer 预测在再次输入时被取消）无法得知 token，会单独计数显示为「未计入」，不计入金额。
 
 > 注意：辅助调用的 usage 只在插件运行时被捕获，不会出现在历史 Session 日志里，所以升级前已经发生的 auto-review 调用无法补算；升级后发生的会计入。Session 日志是唯一的来源，别的客户端/工具若使用同一 API key 不会计入本插件。
 
