@@ -186,13 +186,13 @@ const moduleExports = loaded.factory((name) => {
   if (name === 'react') return React
   throw new Error(`unexpected require: ${name}`)
 })
-assert.deepEqual([...moduleExports.inject], ['slots', 'locale', 'layout'])
+assert.deepEqual([...moduleExports.inject], ['slots', 'locale', 'uiWorkspace'])
 
 const localeRegistrations = []
 const slotRegistrations = []
 const injections = []
-let openedStats = 0
 let currentPanelId = null
+let openedChat = null
 const fakeClientContext = {
   effect(setup) {
     return setup()
@@ -210,6 +210,11 @@ const fakeClientContext = {
   layout: {
     selectPanel(panelId) {
       currentPanelId = panelId
+    },
+  },
+  uiWorkspace: {
+    openSession(sessionId) {
+      openedChat = sessionId
     },
   },
   slots: {
@@ -241,6 +246,8 @@ const assistantActionRegistration = slotRegistrations.find((entry) => entry.opti
 assert.equal(assistantActionRegistration.options.id, 'dsh-usage-meter-turn')
 assert.equal(typeof assistantActionRegistration.Component, 'function')
 assert.equal(panelRegistration.options.key, 'usage-meter')
+assert.equal(typeof panelRegistration.options.inject, 'function', 'the stats page receives navigation')
+assert.equal(typeof panelRegistration.options.inject().openSession, 'function')
 assert.equal(sidebarRegistration.options.id, 'usage-meter')
 assert.equal(sidebarRegistration.options.order, 30)
 assert.equal(sidebarRegistration.options.label(), '用量统计')
@@ -313,9 +320,6 @@ function barProps(overrides = {}) {
     t: zh,
     useSessions: (selector) => selector({ ids: [], byId: {}, phase: 'ready' }),
     usePanelInfo: (selector) => selector({ activePanelId: null }),
-    openStats: () => {
-      openedStats += 1
-    },
     ...overrides,
   }
 }
@@ -343,12 +347,12 @@ assert.equal(barText.includes('输出'), true)
 assert.equal(barText.includes('¥1.10'), true, 'output cost keeps two decimals')
 assert.equal(barText.includes('谷时'), true)
 assert.equal(barText.includes('累计'), false, 'the bar never shows global totals')
-assert.equal(bar.props.role, 'button')
+assert.equal(bar.props.role, undefined, 'the bar is not a button')
+assert.equal(bar.props.tabIndex, undefined)
+assert.equal(bar.props.onClick, undefined, 'clicking the bar must not navigate anywhere')
 assert.equal(bar.props.title.includes('本会话用量'), true)
 assert.equal(bar.props.title.includes('总花费 ¥12.34'), true)
-assert.equal(bar.props.title.includes('点击打开用量统计'), true)
-bar.props.onClick()
-assert.equal(openedStats, 1, 'clicking the bar opens the statistics page')
+assert.equal(bar.props.title.includes('点击打开用量统计'), false, 'the status-bar tooltip carries no click hint')
 
 // A global panel open (Conversation hidden) also hides the bar.
 const panelOpenTree = render(React.createElement(barRegistration.Component, barProps({
@@ -416,6 +420,14 @@ function buildStatsPayload() {
       { model: 'deepseek-flash', cost: 120.5, peakCost: 20.5, offCost: 100, requests: 8_900, totalTokens: 1_200_000_000, estimated: false },
       { model: 'deepseek-v4-pro', cost: 2.95, peakCost: 1, offCost: 1.95, requests: 100, totalTokens: 60_000_000, estimated: false },
     ],
+    chats: [
+      { id: 'session-a', title: 'LeJEPAs', cost: 24.69, cacheHitCost: 20, cacheMissCost: 2.69, outputCost: 2, totalTokens: 120_000_000, requests: 400, lastTime: Date.now() - 3_600_000, models: [{ model: 'deepseek-flash', tokens: 900 }, { model: 'deepseek-v4-pro', tokens: 100 }], efforts: [{ effort: 'max', tokens: 900 }, { effort: 'high', tokens: 100 }] },
+      { id: 'session-b', title: '解释 DreamerV3', cost: 12.35, cacheHitCost: 10, cacheMissCost: 1.35, outputCost: 1, totalTokens: 60_000_000, requests: 200, lastTime: Date.now() - 7_200_000 },
+      { id: 'session-c', title: '排查 A100 TensorBoard 连接报错', cost: 6.17, cacheHitCost: 5, cacheMissCost: 0.67, outputCost: 0.5, totalTokens: 30_000_000, requests: 100, lastTime: Date.now() - 10_800_000 },
+      { id: 'session-d', title: '查找 ResNet identity 通路改进', cost: 4.94, cacheHitCost: 4, cacheMissCost: 0.44, outputCost: 0.5, totalTokens: 24_000_000, requests: 80, lastTime: Date.now() - 14_400_000 },
+      { id: 'session-e', title: '求二维坐标系中的 BRA', cost: 3.09, cacheHitCost: 2.5, cacheMissCost: 0.29, outputCost: 0.3, totalTokens: 15_000_000, requests: 50, lastTime: Date.now() - 18_000_000 },
+      { id: 'session-f', title: '第六个聊天', cost: 2.47, cacheHitCost: 2, cacheMissCost: 0.17, outputCost: 0.3, totalTokens: 12_000_000, requests: 40, lastTime: Date.now() - 21_600_000 },
+    ],
     pricing: { currency: 'CNY', unit: '1M tokens', source: 'DeepSeek official pricing', models: {} },
   }
 }
@@ -424,15 +436,29 @@ const statsPayload = buildStatsPayload()
 let statsFetchCount = 0
 sandbox.fetch = async (url) => {
   statsFetchCount += 1
-  if (String(url).includes('stats')) return { ok: true, status: 200, json: async () => statsPayload }
+  const target = String(url)
+  if (target.includes('chat-meta')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        session: 'session-a',
+        models: [{ model: 'deepseek-flash', tokens: 900 }, { model: 'deepseek-v4-pro', tokens: 100 }],
+        efforts: [{ effort: 'max', tokens: 900 }, { effort: 'high', tokens: 100 }],
+      }),
+    }
+  }
+  if (target.includes('stats')) return { ok: true, status: 200, json: async () => statsPayload }
   return { ok: true, status: 200, json: async () => summaryPayload }
 }
 
 const pageComponent = panelRegistration.Component
-const firstPageTree = render(React.createElement(pageComponent, { t: zh }))
+const pageProps = { t: zh, openSession: (sessionId) => { openedChat = sessionId } }
+const firstPageTree = render(React.createElement(pageComponent, pageProps))
 assert.equal(textOf(firstPageTree).includes('正在读取用量数据…'), true, 'page starts in the loading state')
 await sleep(5)
-let pageTree = render(React.createElement(pageComponent, { t: zh }))
+let pageTree = render(React.createElement(pageComponent, pageProps))
 let pageText = textOf(pageTree)
 assert.equal(pageText.includes('用量统计'), true)
 assert.equal(pageText.includes('累计 Token 数'), true)
@@ -456,6 +482,34 @@ const kpiValues = findAll(pageTree, (element) => element.props.className === 'du
 assert.equal(kpiValues.length, 6, 'six KPI cards')
 const modelRows = findAll(pageTree, (element) => element.props.className === 'dum-model')
 assert.equal(modelRows.length, 2)
+
+// Chat ranking: Codex table shape, adapted from quotas to API cost.
+assert.equal(pageText.includes('聊天用量排行'), true)
+assert.equal(pageText.includes('占累计花费'), false, 'the quota columns are gone')
+assert.equal(pageText.includes('LeJEPAs'), true)
+const chatRows = findAll(pageTree, (element) => typeof element.props.className === 'string' && element.props.className.includes('dum-chats__item'))
+assert.equal(chatRows.length, 5, 'five chats before show more')
+chatRows[0].props.onClick()
+pageTree = render(React.createElement(pageComponent, pageProps))
+await sleep(5)
+pageTree = render(React.createElement(pageComponent, pageProps))
+const expandedText = textOf(pageTree)
+assert.equal(expandedText.includes('花费明细'), true, 'expanded chat shows the cost breakdown')
+assert.equal(expandedText.includes('输入（缓存命中）'), true, 'cost lines keep their labels')
+assert.equal(expandedText.includes('¥20.00'), true, 'cost amounts are shown')
+assert.equal(expandedText.includes('模型'), true, 'expanded chat lists the model mix')
+assert.equal(expandedText.includes('deepseek-flash 90.00%'), true)
+assert.equal(expandedText.includes('强度'), true, 'expanded chat lists the reasoning effort')
+assert.equal(expandedText.includes('最高 90.00%'), true)
+const openChat = findAll(pageTree, (element) => element.props.className === 'dum-chats__open')[0]
+assert.notEqual(openChat, undefined)
+openChat.props.onClick()
+assert.equal(openedChat, 'session-a', 'open chat navigates to the session')
+const showMore = findAll(pageTree, (element) => element.props.className === 'dum-chats__more')[0]
+assert.notEqual(showMore, undefined)
+showMore.props.onClick()
+pageTree = render(React.createElement(pageComponent, pageProps))
+assert.equal(findAll(pageTree, (element) => typeof element.props.className === 'string' && element.props.className.includes('dum-chats__item')).length, 6, 'show more reveals the remaining chats')
 
 // The heatmap owns its styled bubble: no native `title` tooltip may double it.
 for (const cell of heatCells.slice(0, 7)) assert.equal(cell.props.title, undefined, 'no native browser tooltip on heat cells')

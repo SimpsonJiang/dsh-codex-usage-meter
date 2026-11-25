@@ -33,6 +33,8 @@ export const ROUTE_PATH = '/dsh-usage-meter/summary'
 export const STATS_PATH = '/dsh-usage-meter/stats'
 /** Per-Turn cost map for the Chat footer; computed lazily from the session log. */
 export const TURNS_PATH = '/dsh-usage-meter/turns'
+/** Lazily folded model/effort mix of one chat, for the ranking's expanded row. */
+export const CHAT_META_PATH = '/dsh-usage-meter/chat-meta'
 
 const PLUGIN_ID = 'dsh-usage-meter'
 const STATE_FILE = 'usage.json'
@@ -64,6 +66,10 @@ const HISTORY_DAYS = 371
 const BACKFILL_VERSION = 3
 /** Bumped when the session reconciliation passes new per-Session fields. */
 const SESSION_RECONCILE_VERSION = 2
+/** One-time pass that fills Session titles and parent facts for the ranking. */
+const TITLES_VERSION = 2
+/** One-time pass that fills the stored model/effort mix of existing chats. */
+const CHAT_META_VERSION = 1
 const BACKFILL_SESSION_LIMIT = 400
 const BACKFILL_DEADLINE_MS = 60_000
 const BUFFER_LIMIT = 5_000
@@ -359,7 +365,7 @@ export function costOf(usage, rates) {
 }
 
 /** Build one immutable contribution from a settlement event. */
-function makeContribution({ usage, provider, model, time, config }) {
+function makeContribution({ usage, provider, model, time, config, effort }) {
   const resolved = resolvePrice(config, model)
   // `scheduled` (default) follows the published peak windows; `flat` charges
   // the 空闲 price at every hour for accounts that never see the peak price.
@@ -374,6 +380,7 @@ function makeContribution({ usage, provider, model, time, config }) {
     time,
     provider: typeof provider === 'string' ? provider : '',
     model: typeof model === 'string' ? model : '',
+    effort: typeof effort === 'string' ? effort : '',
     priceId: resolved?.priceId ?? '',
     estimated: resolved?.estimated ?? true,
     peak,
@@ -455,6 +462,14 @@ export function createState() {
     days: {},
     models: {},
     sessions: {},
+    /** Latest durable `session/title` per session, for the chat ranking. */
+    titles: {},
+    /** Per-chat token mix by model and reasoning effort, updated live. */
+    chatMeta: {},
+    chatMetaBackfill: { state: 'pending' },
+    /** Session header facts used to fold subagent sessions into their parent chat. */
+    meta: {},
+    titlesBackfill: { state: 'pending' },
     slots: {},
     last: null,
     aux: { requests: 0, cost: 0, tokens: 0, byPurpose: {}, byPurposeRequests: {}, byPurposeTokens: {}, log: [] },
@@ -499,6 +514,62 @@ function ensureBucket(collection, key) {
   return bucket
 }
 
+function tokensOfUsage(usage) {
+  if (!isRecord(usage)) return 0
+  return (finiteNumber(usage.inputTokens) ?? 0)
+    + (finiteNumber(usage.outputTokens) ?? 0)
+    + (finiteNumber(usage.cacheReadTokens) ?? 0)
+    + (finiteNumber(usage.cacheWriteTokens) ?? 0)
+}
+
+/** Add or remove one settlement's tokens from a chat's model/effort mix. */
+function bumpChatMeta(state, sessionId, model, effort, tokens, sign, time) {
+  if (typeof sessionId !== 'string' || sessionId === '' || !(tokens > 0)) return
+  if (!isRecord(state.chatMeta)) state.chatMeta = {}
+  let entry = state.chatMeta[sessionId]
+  if (!isRecord(entry)) {
+    entry = { models: {}, efforts: {}, updatedAt: 0 }
+    state.chatMeta[sessionId] = entry
+  }
+  if (!isRecord(entry.models)) entry.models = {}
+  if (!isRecord(entry.efforts)) entry.efforts = {}
+  const modelKey = typeof model === 'string' && model !== '' ? model.slice(0, 120) : 'unknown'
+  const effortKey = typeof effort === 'string' && effort !== '' ? effort.slice(0, 40) : 'default'
+  const nextModel = Math.max(0, (finiteNumber(entry.models[modelKey]) ?? 0) + sign * tokens)
+  const nextEffort = Math.max(0, (finiteNumber(entry.efforts[effortKey]) ?? 0) + sign * tokens)
+  if (nextModel <= 0) delete entry.models[modelKey]
+  else entry.models[modelKey] = nextModel
+  if (nextEffort <= 0) delete entry.efforts[effortKey]
+  else entry.efforts[effortKey] = nextEffort
+  if (sign > 0) entry.updatedAt = Math.max(finiteNumber(entry.updatedAt) ?? 0, time ?? Date.now())
+}
+
+/** Sorted response arrays for one stored chat mix. */
+function chatMetaArrays(entry) {
+  const models = Object.entries(isRecord(entry?.models) ? entry.models : {})
+    .map(([model, tokens]) => ({ model, tokens: Math.max(0, Math.floor(finiteNumber(tokens) ?? 0)) }))
+    .filter((item) => item.tokens > 0)
+    .sort((left, right) => right.tokens - left.tokens)
+  const efforts = Object.entries(isRecord(entry?.efforts) ? entry.efforts : {})
+    .map(([effort, tokens]) => ({ effort, tokens: Math.max(0, Math.floor(finiteNumber(tokens) ?? 0)) }))
+    .filter((item) => item.tokens > 0)
+    .sort((left, right) => right.tokens - left.tokens)
+  return { models, efforts }
+}
+
+function storeChatMetaFold(state, sessionId, folded) {
+  if (!isRecord(state.chatMeta)) state.chatMeta = {}
+  const models = {}
+  for (const item of Array.isArray(folded?.models) ? folded.models : []) {
+    if (isRecord(item) && typeof item.model === 'string' && item.tokens > 0) models[item.model] = item.tokens
+  }
+  const efforts = {}
+  for (const item of Array.isArray(folded?.efforts) ? folded.efforts : []) {
+    if (isRecord(item) && typeof item.effort === 'string' && item.tokens > 0) efforts[item.effort] = item.tokens
+  }
+  state.chatMeta[sessionId] = { models, efforts, updatedAt: Date.now() }
+}
+
 function ensureSession(state, sessionId) {
   let session = state.sessions[sessionId]
   if (session === undefined) {
@@ -539,6 +610,7 @@ function sanitizeSlot(raw) {
     time,
     provider: typeof raw.provider === 'string' ? raw.provider : '',
     model: typeof raw.model === 'string' ? raw.model : '',
+    effort: typeof raw.effort === 'string' ? raw.effort : '',
     priceId: typeof raw.priceId === 'string' ? raw.priceId : '',
     estimated: raw.estimated === true,
     peak: raw.peak === true,
@@ -589,6 +661,62 @@ export function sanitizeState(raw) {
       if (typeof key !== 'string' || key === '' || key.length > 200 || Object.keys(state.sessions).length >= SESSION_LIMIT * 2) continue
       const session = sanitizeSessionRecord(value)
       if (session !== undefined) state.sessions[key] = session
+    }
+  }
+  if (isRecord(raw.titles)) {
+    for (const [key, value] of Object.entries(raw.titles)) {
+      if (typeof key !== 'string' || key === '' || key.length > 200) continue
+      if (typeof value !== 'string') continue
+      const title = value.trim()
+      if (title === '' || Object.keys(state.titles).length >= SESSION_LIMIT * 2) continue
+      state.titles[key] = title.slice(0, 200)
+    }
+  }
+  if (isRecord(raw.meta)) {
+    for (const [key, value] of Object.entries(raw.meta)) {
+      if (typeof key !== 'string' || key === '' || key.length > 200) continue
+      if (!isRecord(value)) continue
+      const entry = {}
+      if (value.origin === 'subagent') entry.origin = 'subagent'
+      if (typeof value.parent === 'string' && value.parent !== '' && value.parent.length <= 200) {
+        entry.parent = value.parent
+      }
+      if (Object.keys(entry).length > 0) state.meta[key] = entry
+      if (Object.keys(state.meta).length >= SESSION_LIMIT * 2) break
+    }
+  }
+  if (isRecord(raw.chatMeta)) {
+    for (const [key, value] of Object.entries(raw.chatMeta)) {
+      if (typeof key !== 'string' || key === '' || key.length > 200) continue
+      if (!isRecord(value)) continue
+      const models = {}
+      for (const [model, tokens] of Object.entries(isRecord(value.models) ? value.models : {})) {
+        if (typeof model !== 'string' || model === '' || model.length > 120) continue
+        const count = finiteNumber(tokens)
+        if (count !== undefined && count > 0) models[model] = Math.floor(count)
+      }
+      const efforts = {}
+      for (const [effort, tokens] of Object.entries(isRecord(value.efforts) ? value.efforts : {})) {
+        if (typeof effort !== 'string' || effort === '' || effort.length > 40) continue
+        const count = finiteNumber(tokens)
+        if (count !== undefined && count > 0) efforts[effort] = Math.floor(count)
+      }
+      state.chatMeta[key] = { models, efforts, updatedAt: finiteNumber(value.updatedAt) ?? 0 }
+      if (Object.keys(state.chatMeta).length >= SESSION_LIMIT * 2) break
+    }
+  }
+  if (isRecord(raw.chatMetaBackfill) && finiteNumber(raw.chatMetaBackfill.version) === CHAT_META_VERSION) {
+    state.chatMetaBackfill = {
+      state: raw.chatMetaBackfill.state === 'done' ? 'done' : 'partial',
+      version: CHAT_META_VERSION,
+      ...(finiteNumber(raw.chatMetaBackfill.at) === undefined ? {} : { at: raw.chatMetaBackfill.at }),
+    }
+  }
+  if (isRecord(raw.titlesBackfill) && finiteNumber(raw.titlesBackfill.version) === TITLES_VERSION) {
+    state.titlesBackfill = {
+      state: raw.titlesBackfill.state === 'done' ? 'done' : 'partial',
+      version: TITLES_VERSION,
+      ...(finiteNumber(raw.titlesBackfill.at) === undefined ? {} : { at: raw.titlesBackfill.at }),
     }
   }
   if (isRecord(raw.slots)) {
@@ -768,6 +896,21 @@ export function pruneState(state, config, now) {
     sessionIds.sort((left, right) => (state.sessions[left].lastTime ?? 0) - (state.sessions[right].lastTime ?? 0))
     for (let index = 0; index < sessionIds.length - SESSION_LIMIT; index += 1) delete state.sessions[sessionIds[index]]
   }
+  if (isRecord(state.titles)) {
+    for (const key of Object.keys(state.titles)) {
+      if (state.sessions[key] === undefined) delete state.titles[key]
+    }
+  }
+  if (isRecord(state.meta)) {
+    for (const key of Object.keys(state.meta)) {
+      if (state.sessions[key] === undefined) delete state.meta[key]
+    }
+  }
+  if (isRecord(state.chatMeta)) {
+    for (const key of Object.keys(state.chatMeta)) {
+      if (state.sessions[key] === undefined) delete state.chatMeta[key]
+    }
+  }
   const slotEntries = Object.entries(state.slots)
   if (slotEntries.length === 0) return
   const fresh = slotEntries.filter(([, slot]) => {
@@ -920,6 +1063,59 @@ export function foldTurnCosts(events, inherited, config, cap) {
   return { turns, messages: Object.fromEntries(messages) }
 }
 
+/**
+ * Fold one session log into its token mix by model and by reasoning effort.
+ * Token counts (not money) keep the percentages meaningful for API billing.
+ */
+export function foldSessionChatMeta(events, inherited) {
+  let route = { provider: '', model: '', effort: '' }
+  const models = new Map()
+  const efforts = new Map()
+  const list = Array.isArray(events) ? [...events] : []
+  list.sort((left, right) => (finiteNumber(left?.seq) ?? 0) - (finiteNumber(right?.seq) ?? 0))
+  for (const event of list) {
+    if (!isRecord(event) || typeof event.type !== 'string') continue
+    if ((finiteNumber(event?.seq) ?? 0) < inherited) continue
+    if (event.type === 'request/header') {
+      const config = event?.data?.header?.config
+      if (isRecord(config)) {
+        route = {
+          provider: typeof config.provider === 'string' ? config.provider : route.provider,
+          model: typeof config.model === 'string' ? config.model : route.model,
+          effort: typeof config.reasoningEffort === 'string' ? config.reasoningEffort : '',
+        }
+      }
+      continue
+    }
+    if (event.type === 'request/context') {
+      const data = event.data
+      if (isRecord(data)) {
+        route = {
+          ...route,
+          provider: typeof data.provider === 'string' ? data.provider : route.provider,
+          model: typeof data.model === 'string' ? data.model : route.model,
+        }
+      }
+      continue
+    }
+    if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') continue
+    const rawUsage = usageOfEvent(event)
+    if (rawUsage === undefined) continue
+    const usage = readUsage(rawUsage)
+    const tokens = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+    if (tokens <= 0) continue
+    const source = event.type === 'assistant/message' ? sourceOfMessage(event) : route
+    const model = (source.model || route.model || 'unknown').slice(0, 120)
+    const effort = route.effort === '' ? 'default' : route.effort
+    models.set(model, (models.get(model) ?? 0) + tokens)
+    efforts.set(effort, (efforts.get(effort) ?? 0) + tokens)
+  }
+  return {
+    models: [...models].map(([model, tokens]) => ({ model, tokens })).sort((left, right) => right.tokens - left.tokens),
+    efforts: [...efforts].map(([effort, tokens]) => ({ effort, tokens })).sort((left, right) => right.tokens - left.tokens),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
@@ -1033,6 +1229,91 @@ function presentModels(state) {
     })
     .sort((left, right) => right.cost - left.cost)
     .slice(0, 6)
+}
+
+/** Top user chats by cost; subagent sessions fold into their parent chat. */
+function presentChats(state) {
+  const titles = isRecord(state.titles) ? state.titles : {}
+  const meta = isRecord(state.meta) ? state.meta : {}
+  const chatMeta = isRecord(state.chatMeta) ? state.chatMeta : {}
+  const copyMix = (source) => {
+    const out = {}
+    if (!isRecord(source)) return out
+    for (const [key, value] of Object.entries(source)) {
+      const count = finiteNumber(value)
+      if (typeof key === 'string' && key !== '' && count !== undefined && count > 0) out[key] = count
+    }
+    return out
+  }
+  const addMix = (target, source) => {
+    if (!isRecord(source)) return
+    for (const [key, value] of Object.entries(source)) {
+      const count = finiteNumber(value)
+      if (typeof key !== 'string' || key === '' || count === undefined || count <= 0) continue
+      target[key] = (finiteNumber(target[key]) ?? 0) + count
+    }
+  }
+  const mixArray = (mix, labelKey) => Object.entries(mix)
+    .map(([key, tokens]) => ({ [labelKey]: key, tokens: Math.round(tokens) }))
+    .filter((item) => item.tokens > 0)
+    .sort((left, right) => right.tokens - left.tokens)
+  const rows = new Map()
+  for (const [id, raw] of Object.entries(state.sessions)) {
+    if (!isRecord(raw)) continue
+    const info = isRecord(meta[id]) ? meta[id] : undefined
+    if (info?.origin === 'subagent') continue
+    const totals = sanitizeTotals(raw)
+    if (totals.requests <= 0 && totals.cost <= 0) continue
+    rows.set(id, {
+      id,
+      title: typeof titles[id] === 'string' ? titles[id] : '',
+      costRaw: totals.cost,
+      hitRaw: totals.cacheHitCost,
+      missRaw: totals.cacheMissCost,
+      outRaw: totals.outputCost,
+      totalTokens: totalTokensOf(totals),
+      requests: totals.requests,
+      lastTime: finiteNumber(raw.lastTime) ?? 0,
+      modelMix: copyMix(chatMeta[id]?.models),
+      effortMix: copyMix(chatMeta[id]?.efforts),
+    })
+  }
+  for (const [id, raw] of Object.entries(state.sessions)) {
+    if (!isRecord(raw)) continue
+    const info = isRecord(meta[id]) ? meta[id] : undefined
+    if (info?.origin !== 'subagent') continue
+    const parent = typeof info.parent === 'string' ? rows.get(info.parent) : undefined
+    if (parent === undefined) continue
+    const totals = sanitizeTotals(raw)
+    if (totals.requests <= 0 && totals.cost <= 0) continue
+    parent.costRaw += totals.cost
+    parent.hitRaw += totals.cacheHitCost
+    parent.missRaw += totals.cacheMissCost
+    parent.outRaw += totals.outputCost
+    parent.totalTokens += totalTokensOf(totals)
+    parent.requests += totals.requests
+    parent.lastTime = Math.max(parent.lastTime, finiteNumber(raw.lastTime) ?? 0)
+    addMix(parent.modelMix, chatMeta[id]?.models)
+    addMix(parent.effortMix, chatMeta[id]?.efforts)
+  }
+  return [...rows.values()]
+    .map((row) => ({
+      id: row.id,
+      title: row.title,
+      cost: roundCost(row.costRaw),
+      cacheHitCost: roundCost(row.hitRaw),
+      cacheMissCost: roundCost(row.missRaw),
+      outputCost: roundCost(row.outRaw),
+      totalTokens: row.totalTokens,
+      requests: row.requests,
+      lastTime: row.lastTime,
+      models: mixArray(row.modelMix, 'model'),
+      efforts: mixArray(row.effortMix, 'effort'),
+    }))
+    .sort((left, right) => right.cost - left.cost
+      || right.totalTokens - left.totalTokens
+      || right.lastTime - left.lastTime)
+    .slice(0, 20)
 }
 
 function presentSession(state, sessionId) {
@@ -1195,6 +1476,7 @@ export function buildStats(state, config, now) {
     },
     days,
     models: presentModels(state),
+    chats: presentChats(state),
     auxCalls: {
       requests: Math.max(0, Math.floor(finiteNumber(state.aux?.requests) ?? 0)),
       cost: roundCost(state.aux?.cost),
@@ -1256,6 +1538,8 @@ export function apply(ctx, rawConfig) {
   const turnStarts = new Map()
   /** Lazily folded per-Turn costs, dropped whenever the session log advances. */
   const turnCache = new Map()
+  /** Lazily folded model/effort mix, invalidated by the same session events. */
+  const chatMetaCache = new Map()
   /** Newest live events per session, so a just-settled Turn folds before the log flushes. */
   const liveEvents = new Map()
   const LIVE_EVENT_LIMIT = 400
@@ -1366,9 +1650,34 @@ export function apply(ctx, rawConfig) {
       || (time < options.cap && time >= options.floor)
     if (!inWindow) return
 
+    if (event.type === 'session/title') {
+      const title = typeof event.data?.title === 'string' ? event.data.title.trim() : ''
+      if (title !== '') {
+        if (!isRecord(state.titles)) state.titles = {}
+        const next = title.slice(0, 200)
+        if (state.titles[sessionId] !== next) {
+          state.titles[sessionId] = next
+          state.revision += 1
+          state.updatedAt = Date.now()
+          markDirty()
+        }
+      }
+      return
+    }
+
     if (event.type === 'request/header' || event.type === 'request/context') {
-      const route = routeOfEvent(event)
-      if (route !== undefined) (options.routes ?? routes).set(sessionId, route)
+      const next = routeOfEvent(event)
+      if (next !== undefined) {
+        const store = options.routes ?? routes
+        const previousRoute = store.get(sessionId)
+        const header = event.type === 'request/header' && isRecord(event.data?.header?.config)
+          ? event.data.header.config
+          : undefined
+        const effort = header !== undefined && typeof header.reasoningEffort === 'string'
+          ? header.reasoningEffort
+          : (typeof previousRoute?.effort === 'string' ? previousRoute.effort : '')
+        store.set(sessionId, { ...next, effort })
+      }
       return
     }
     if (event.type === 'llm/retry-started') {
@@ -1382,19 +1691,28 @@ export function apply(ctx, rawConfig) {
     if (rawUsage === undefined) return
     const usage = readUsage(rawUsage)
     if (usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens <= 0) return
+    const tokens = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
     const turn = integerOf(event.data?.turn)
     const step = integerOf(event.data?.step)
     const key = slotKey(sessionId, turn, step, event.seq)
     const slotStore = options.slots
     const previous = slotStore !== undefined ? slotStore.get(key) : state.slots[key]
-    if (previous !== undefined) applyContribution(previous, -1, sessionTarget)
-    const source = event.type === 'assistant/message'
-      ? sourceOfMessage(event)
-      : (options.routes ?? routes).get(sessionId) ?? { provider: '', model: '' }
-    const contribution = makeContribution({ usage, provider: source.provider, model: source.model, time, config })
+    if (previous !== undefined) {
+      applyContribution(previous, -1, sessionTarget)
+      if (sessionTarget !== undefined) {
+        bumpChatMeta(state, sessionTarget, previous.model, previous.effort, tokensOfUsage(previous.usage), -1, time)
+      }
+    }
+    const route = (options.routes ?? routes).get(sessionId) ?? { provider: '', model: '', effort: '' }
+    const source = event.type === 'assistant/message' ? sourceOfMessage(event) : route
+    const effort = typeof route.effort === 'string' ? route.effort : ''
+    const contribution = makeContribution({ usage, provider: source.provider, model: source.model, time, config, effort })
     if (slotStore !== undefined) slotStore.set(key, contribution)
     else state.slots[key] = contribution
     applyContribution(contribution, 1, sessionTarget)
+    if (sessionTarget !== undefined) {
+      bumpChatMeta(state, sessionTarget, contribution.model, effort, tokens, 1, time)
+    }
     if (state.last === null || time >= state.last.time) {
       state.last = {
         time,
@@ -1414,6 +1732,7 @@ export function apply(ctx, rawConfig) {
   const onSessionEvent = (session, event) => {
     const sessionId = typeof session?.id === 'string' ? session.id : String(session?.id ?? '')
     turnCache.delete(sessionId)
+    chatMetaCache.delete(sessionId)
     recordLiveEvent(sessionId, event)
     if (!loaded || backfilling) {
       if (buffer.length < BUFFER_LIMIT) buffer.push([sessionId, event])
@@ -1733,6 +2052,95 @@ export function apply(ctx, rawConfig) {
       }
       void persist()
     }
+    /** One-time fill of durable Session titles for the chat ranking. */
+    const ensureTitles = async () => {
+      const marker = isRecord(state.titlesBackfill) ? state.titlesBackfill : undefined
+      if (marker?.version === TITLES_VERSION && marker.state === 'done') return
+      const query = ctx.get('sessionQuery')
+      if (query === undefined || typeof query.readTitleSnapshots !== 'function') return
+      const startedAt = Date.now()
+      let records
+      try {
+        records = await listSessions()
+      } catch {
+        records = []
+      }
+      const recordsList = Array.isArray(records) ? records : []
+      if (!isRecord(state.meta)) state.meta = {}
+      for (const record of recordsList) {
+        const header = record?.header
+        const id = String(header?.id ?? '')
+        if (id === '' || id.length > 200) continue
+        const entry = {}
+        if (header?.origin === 'subagent') entry.origin = 'subagent'
+        const parent = header?.parentSession
+        if (typeof parent === 'string' && parent !== '' && parent.length <= 200) entry.parent = parent
+        if (Object.keys(entry).length > 0) state.meta[id] = entry
+        else if (state.meta[id] !== undefined) delete state.meta[id]
+      }
+      const known = new Set(Object.entries(state.sessions)
+        .sort((left, right) => (finiteNumber(right[1]?.cost) ?? 0) - (finiteNumber(left[1]?.cost) ?? 0))
+        .slice(0, 60)
+        .map(([id]) => id))
+      const ids = recordsList
+        .map((record) => String(record?.header?.id ?? ''))
+        .filter((id) => id !== '' && known.has(id))
+        .slice(0, BACKFILL_SESSION_LIMIT)
+      if (!isRecord(state.titles)) state.titles = {}
+      let truncated = false
+      for (let index = 0; index < ids.length; index += 50) {
+        if (Date.now() - startedAt > BACKFILL_DEADLINE_MS) {
+          truncated = true
+          break
+        }
+        const chunk = ids.slice(index, index + 50)
+        let results
+        try {
+          results = await query.readTitleSnapshots(chunk)
+        } catch {
+          continue
+        }
+        for (const result of Array.isArray(results) ? results : []) {
+          if (result?.status !== 'fulfilled') continue
+          const title = result.value?.title?.title
+          if (typeof title !== 'string' || title.trim() === '') continue
+          state.titles[String(result.sessionId)] = title.trim().slice(0, 200)
+        }
+      }
+      state.titlesBackfill = { state: truncated ? 'partial' : 'done', version: TITLES_VERSION, at: Date.now() }
+      state.updatedAt = Date.now()
+      markDirty()
+    }
+    /** One-time fill of the stored model/effort mix for existing chats. */
+    const ensureChatMeta = async () => {
+      const marker = isRecord(state.chatMetaBackfill) ? state.chatMetaBackfill : undefined
+      if (marker?.version === CHAT_META_VERSION && marker.state === 'done') return
+      const startedAt = Date.now()
+      if (!isRecord(state.chatMeta)) state.chatMeta = {}
+      const candidates = Object.entries(state.sessions)
+        .filter(([id]) => !isRecord(state.chatMeta[id]))
+        .sort((left, right) => (finiteNumber(right[1]?.cost) ?? 0) - (finiteNumber(left[1]?.cost) ?? 0))
+        .slice(0, 80)
+      let truncated = false
+      for (const [id] of candidates) {
+        if (Date.now() - startedAt > 30_000) {
+          truncated = true
+          break
+        }
+        try {
+          const snapshot = await readSessionLog({ header: { id } })
+          if (snapshot === undefined) continue
+          const inherited = Math.max(0, integerOf(snapshot.inheritedEventCount) ?? 0)
+          storeChatMetaFold(state, id, foldSessionChatMeta(snapshot.events, inherited))
+          markDirty()
+        } catch (error) {
+          console.warn(`[dsh-usage-meter] chat meta skipped one session: ${messageOf(error)}`)
+        }
+      }
+      state.chatMetaBackfill = { state: truncated ? 'partial' : 'done', version: CHAT_META_VERSION, at: Date.now() }
+      state.updatedAt = Date.now()
+      markDirty()
+    }
     void (async () => {
       try {
         dataDir = resolvePluginDataDir(ctx)
@@ -1765,6 +2173,10 @@ export function apply(ctx, rawConfig) {
         console.warn(`[dsh-usage-meter] state bootstrap failed: ${messageOf(error)}`)
       } finally {
         finishBootstrap()
+        // Titles and stored chat mixes are filled in the background so the
+        // routes never wait on session-log reads.
+        void ensureTitles()
+        void ensureChatMeta()
       }
     })()
     return () => {
@@ -1888,6 +2300,45 @@ export function apply(ctx, rawConfig) {
     }
   }
 
+  const handleChatMeta = async (request, response) => {
+    if (request.method !== 'GET') {
+      response.writeHead(405, { allow: 'GET', 'cache-control': 'no-store' })
+      response.end()
+      return
+    }
+    if (!requireLoaded(response)) return
+    try {
+      const session = requestUrl(request).searchParams.get('session')
+      if (session === null || !/^[A-Za-z0-9._:-]{1,200}$/.test(session)) {
+        sendJson(response, 400, { ok: false, error: 'invalid session id' })
+        return
+      }
+      const stored = isRecord(state.chatMeta) && isRecord(state.chatMeta[session]) ? state.chatMeta[session] : undefined
+      if (stored !== undefined) {
+        const arrays = chatMetaArrays(stored)
+        sendJson(response, 200, { ok: true, session, models: arrays.models, efforts: arrays.efforts, stored: true })
+        return
+      }
+      const cached = chatMetaCache.get(session)
+      let payload = cached !== undefined && Date.now() - cached.at < 5_000 ? cached.payload : undefined
+      if (payload === undefined) {
+        const snapshot = await readSessionLog({ header: { id: session } })
+        if (snapshot === undefined) {
+          sendJson(response, 404, { ok: false, error: 'session unavailable' })
+          return
+        }
+        const inherited = Math.max(0, integerOf(snapshot.inheritedEventCount) ?? 0)
+        payload = foldSessionChatMeta(snapshot.events, inherited)
+        chatMetaCache.set(session, { at: Date.now(), payload })
+        storeChatMetaFold(state, session, payload)
+        markDirty()
+      }
+      sendJson(response, 200, { ok: true, session, models: payload.models, efforts: payload.efforts })
+    } catch (error) {
+      sendJson(response, 500, { ok: false, error: messageOf(error) })
+    }
+  }
+
   ctx.inject(['webServer'], (webCtx) => {
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: ROUTE_PATH, handler: handleSummary }),
@@ -1901,6 +2352,10 @@ export function apply(ctx, rawConfig) {
       () => webCtx.webServer.register({ kind: 'exact', path: TURNS_PATH, handler: handleTurns }),
       'dsh-usage-meter: turns route',
     )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: CHAT_META_PATH, handler: handleChatMeta }),
+      'dsh-usage-meter: chat meta route',
+    )
   })
 }
 
@@ -1912,6 +2367,7 @@ export const __internals = {
   computeStreaks,
   costOf,
   createState,
+  foldSessionChatMeta,
   foldSessionTotals,
   foldTurnCosts,
   isPeak,
@@ -1919,6 +2375,7 @@ export const __internals = {
   nextPeriodChange,
   normalizePricePair,
   pricingSignature,
+  presentChats,
   pruneState,
   readUsage,
   resolveConfig,

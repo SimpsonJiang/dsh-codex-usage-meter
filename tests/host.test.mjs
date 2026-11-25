@@ -22,12 +22,14 @@ const {
   computeStreaks,
   costOf,
   createState,
+  foldSessionChatMeta,
   foldSessionTotals,
   foldTurnCosts,
   isPeak,
   localDateKey,
   nextPeriodChange,
   pricingSignature,
+  presentChats,
   roundCost,
   pruneState,
   resolveConfig,
@@ -158,9 +160,11 @@ async function mount(services, config) {
   const summaryRoute = fake.routes.get('/dsh-usage-meter/summary')
   const statsRoute = fake.routes.get('/dsh-usage-meter/stats')
   const turnsRoute = fake.routes.get('/dsh-usage-meter/turns')
+  const chatMetaRoute = fake.routes.get('/dsh-usage-meter/chat-meta')
   assert.equal(summaryRoute !== undefined, true, 'summary route registered')
   assert.equal(statsRoute !== undefined, true, 'stats route registered')
   assert.equal(turnsRoute !== undefined, true, 'turns route registered')
+  assert.equal(chatMetaRoute !== undefined, true, 'chat meta route registered')
   await waitFor(() => {
     const result = callRoute(summaryRoute)
     return result.payload?.ok === true
@@ -170,6 +174,7 @@ async function mount(services, config) {
     summaryRoute,
     statsRoute,
     turnsRoute,
+    chatMetaRoute,
     emit: (session, event) => fake.listeners.get('session/event')(session, event),
     /** Drive the registered llm/stream waterfall listener with a fake chunk stream. */
     callLlmStream: async (options, chunks) => {
@@ -187,12 +192,12 @@ async function mount(services, config) {
   }
 }
 
-function requestHeaderEvent({ time, model = 'deepseek-flash', provider = 'deepseek-official', seq = 1 }) {
+function requestHeaderEvent({ time, model = 'deepseek-flash', provider = 'deepseek-official', seq = 1, reasoningEffort }) {
   return {
     type: 'request/header',
     seq,
     time,
-    data: { header: { config: { provider, model } }, reason: 'initial' },
+    data: { header: { config: { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) } }, reason: 'initial' },
   }
 }
 
@@ -650,6 +655,87 @@ await test('turns route serves per-turn costs for one session', async () => {
   assert.equal(result.payload.messages.m2, 2)
   const invalid = await callRouteAsync(mounted.turnsRoute, { url: '/dsh-usage-meter/turns?session=bad%2Fid' })
   assert.equal(invalid.status, 400)
+})
+
+await test('stats ranks chats by cost and folds durable titles', async () => {
+  await useFreshProfile()
+  const at = Date.now() - 60_000
+  const rate = flashInputRate(at)
+  const { emit, stats } = await mount({}, { backfill: false })
+  emit({ id: 'session-a' }, requestHeaderEvent({ time: at, seq: 1 }))
+  emit({ id: 'session-a' }, messageEvent({ turn: 1, step: 1, time: at, seq: 2, usage: { inputTokens: 1_000_000, outputTokens: 0 } }))
+  emit({ id: 'session-a' }, { type: 'session/title', seq: 3, time: at, data: { title: 'LeJEPAs', messageSeqs: [] } })
+  emit({ id: 'session-b' }, requestHeaderEvent({ time: at, seq: 1 }))
+  emit({ id: 'session-b' }, messageEvent({ turn: 1, step: 1, time: at, seq: 2, usage: { inputTokens: 2_000_000, outputTokens: 0 } }))
+  const payload = stats()
+  assert.equal(payload.chats.length, 2)
+  assert.equal(payload.chats[0].id, 'session-b', 'ranked by cost, highest first')
+  assert.equal(payload.chats[0].cost, roundCost(2 * rate))
+  assert.equal(payload.chats[0].title, '')
+  assert.deepEqual(payload.chats[0].models, [{ model: 'deepseek-flash', tokens: 2_000_000 }])
+  assert.deepEqual(payload.chats[0].efforts, [{ effort: 'default', tokens: 2_000_000 }])
+  assert.equal(payload.chats[1].id, 'session-a')
+  assert.equal(payload.chats[1].cost, roundCost(rate))
+  assert.equal(payload.chats[1].title, 'LeJEPAs')
+})
+
+await test('stores the chat mix live and serves it without re-reading logs', async () => {
+  const dir = await useFreshProfile()
+  const at = Date.now() - 60_000
+  const mounted = await mount({}, { backfill: false, flushMs: 250 })
+  mounted.emit({ id: 'session-live' }, requestHeaderEvent({ time: at, seq: 1, reasoningEffort: 'max' }))
+  mounted.emit({ id: 'session-live' }, messageEvent({ turn: 1, step: 1, time: at, seq: 2, usage: { inputTokens: 1_000_000, outputTokens: 0 } }))
+  const meta = await callRouteAsync(mounted.chatMetaRoute, { url: '/dsh-usage-meter/chat-meta?session=session-live' })
+  assert.equal(meta.status, 200)
+  assert.equal(meta.payload.ok, true)
+  assert.equal(meta.payload.stored, true, 'served from the stored map, not from the log')
+  assert.deepEqual(meta.payload.models, [{ model: 'deepseek-flash', tokens: 1_000_000 }])
+  assert.deepEqual(meta.payload.efforts, [{ effort: 'max', tokens: 1_000_000 }])
+  await sleep(800)
+  const saved = JSON.parse(await readFile(join(dir, 'plugin-data', 'dsh-usage-meter', 'usage.json'), 'utf8'))
+  assert.deepEqual(saved.chatMeta['session-live'].models, { 'deepseek-flash': 1_000_000 })
+  assert.deepEqual(saved.chatMeta['session-live'].efforts, { max: 1_000_000 })
+})
+
+await test('chat ranking folds subagent sessions into their parent chat', () => {
+  const at = Date.now() - 60_000
+  const bucket = { ...createState().total }
+  const state = createState()
+  state.sessions.chat = { ...bucket, requests: 1, cost: 1.25, cacheHitCost: 1, cacheMissCost: 0.2, outputCost: 0.05, cacheReadTokens: 1_000, inputTokens: 100, outputTokens: 50, lastTime: at }
+  state.sessions.sub = { ...bucket, requests: 2, cost: 0.75, cacheHitCost: 0.5, cacheMissCost: 0.2, outputCost: 0.05, cacheReadTokens: 700, inputTokens: 50, outputTokens: 30, lastTime: at + 1_000 }
+  state.titles.chat = 'Parent chat'
+  state.titles.sub = 'Research task'
+  state.meta.sub = { origin: 'subagent', parent: 'chat' }
+  const chats = presentChats(state)
+  assert.equal(chats.length, 1, 'the subagent row is not listed separately')
+  assert.equal(chats[0].id, 'chat')
+  assert.equal(chats[0].title, 'Parent chat')
+  assert.equal(chats[0].cost, 2)
+  assert.equal(chats[0].requests, 3)
+  assert.equal(chats[0].totalTokens, 1_150 + 780)
+})
+
+await test('chat meta folds the token mix by model and reasoning effort', () => {
+  const at = Date.now() - 60_000
+  const events = [
+    requestHeaderEvent({ time: at, seq: 1, reasoningEffort: 'max' }),
+    messageEvent({ turn: 1, step: 1, time: at, seq: 2, usage: { inputTokens: 1_000_000, outputTokens: 0 } }),
+    requestHeaderEvent({ time: at + 1_000, seq: 3, reasoningEffort: 'high' }),
+    messageEvent({ turn: 1, step: 2, time: at + 1_000, seq: 4, model: 'deepseek-v4-pro', usage: { inputTokens: 2_000_000, outputTokens: 0 } }),
+  ]
+  const meta = foldSessionChatMeta(events, 0)
+  assert.deepEqual(meta.models, [
+    { model: 'deepseek-v4-pro', tokens: 2_000_000 },
+    { model: 'deepseek-flash', tokens: 1_000_000 },
+  ])
+  assert.deepEqual(meta.efforts, [
+    { effort: 'high', tokens: 2_000_000 },
+    { effort: 'max', tokens: 1_000_000 },
+  ])
+  const withoutHeader = foldSessionChatMeta([
+    messageEvent({ turn: 1, step: 1, time: at, seq: 1, usage: { inputTokens: 500, outputTokens: 0 } }),
+  ], 0)
+  assert.deepEqual(withoutHeader.efforts, [{ effort: 'default', tokens: 500 }])
 })
 
 await test('rejects bad methods and invalid session ids', async () => {
