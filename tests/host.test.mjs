@@ -23,6 +23,7 @@ const {
   costOf,
   createState,
   foldSessionChatMeta,
+  foldDayTotals,
   foldSessionTotals,
   foldTurnCosts,
   isPeak,
@@ -736,6 +737,23 @@ await test('chat meta folds the token mix by model and reasoning effort', () => 
     messageEvent({ turn: 1, step: 1, time: at, seq: 1, usage: { inputTokens: 500, outputTokens: 0 } }),
   ], 0)
   assert.deepEqual(withoutHeader.efforts, [{ effort: 'default', tokens: 500 }])
+})
+
+await test('folds only the calls inside one local-day window', () => {
+  const config = resolveConfig({})
+  const at = Date.UTC(2026, 10, 25, 2, 0, 0)
+  const events = [
+    requestHeaderEvent({ time: at - 1_000, seq: 1 }),
+    messageEvent({ turn: 1, step: 1, time: at, seq: 2, usage: { inputTokens: 1_000_000, outputTokens: 0 } }),
+    messageEvent({ turn: 1, step: 2, time: at + 20_000, seq: 3, usage: { inputTokens: 2_000_000, outputTokens: 0 } }),
+  ]
+  const first = foldDayTotals(events, 0, config, at - 10_000, at + 10_000)
+  assert.equal(first.inputTokens, 1_000_000)
+  assert.equal(first.requests, 1)
+  assert.equal(first.cost > 0, true)
+  const second = foldDayTotals(events, 0, config, at + 10_000, at + 30_000)
+  assert.equal(second.inputTokens, 2_000_000)
+  assert.equal(second.requests, 1)
 })
 
 await test('rejects bad methods and invalid session ids', async () => {

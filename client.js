@@ -34,8 +34,10 @@ window.__ModuleLoader__.load({
     const ERROR_POLL_MS = 15_000
     const HEATMAP_DAYS = 371
     const CELL = 11
+    const CELL_HEIGHT = 11
     const GAP = 3
     const STEP = CELL + GAP
+    const ROW_STEP = CELL_HEIGHT + GAP
 
     const DICTIONARIES = {
       zh: {
@@ -301,19 +303,20 @@ window.__ModuleLoader__.load({
       '.dum-heat{position:relative;padding:14px 18px 0}',
       '.dum-heat__canvas{position:relative;width:max-content}',
       '.dum-heat__grid{display:grid;gap:3px}',
-      '.dum-heat__cell{border-radius:2px;width:11px;height:11px}',
-      '.dum-heat__l0{background:color-mix(in srgb,var(--dsw-alias-label-secondary,#5c5c5c) 16%,var(--dsw-alias-bg-layer-1,#fff))}',
-      '.dum-heat__l1{background:color-mix(in srgb,#3b82f6 26%,var(--dsw-alias-bg-layer-1,#fff))}',
-      '.dum-heat__l2{background:color-mix(in srgb,#3b82f6 46%,var(--dsw-alias-bg-layer-1,#fff))}',
-      '.dum-heat__l3{background:color-mix(in srgb,#3b82f6 68%,var(--dsw-alias-bg-layer-1,#fff))}',
-      '.dum-heat__l4{background:#3b82f6}',
-      '.dum-heat__bar{background:color-mix(in srgb,#3b82f6 92%,var(--dsw-alias-bg-layer-1,#fff))}',
+      '.dum-heat__cell{border-radius:3px;width:11px;height:11px}',
+      '.dum-heat__l0{background:color-mix(in srgb,var(--dsw-alias-label-secondary,#5c5c5c) 20%,var(--dsw-alias-bg-layer-1,#fff))}',
+      '.dum-heat__l1{background:color-mix(in srgb,#3b82f6 45%,var(--dsw-alias-bg-layer-1,#fff))}',
+      '.dum-heat__l2{background:color-mix(in srgb,#3b82f6 66%,var(--dsw-alias-bg-layer-1,#fff))}',
+      '.dum-heat__l3{background:color-mix(in srgb,#3b82f6 86%,var(--dsw-alias-bg-layer-1,#fff))}',
+      '.dum-heat__l4{background:#2563eb}',
+      '.dum-heat__bar{background:#2563eb}',
+      'body[data-ds-dark-theme] .dum-heat__l4,body[data-ds-dark-theme] .dum-heat__bar{background:#3b82f6}',
       '.dum-heat__months{display:grid;gap:3px;margin-top:6px;height:16px;font-size:11px;',
       'color:var(--dum-tertiary,#8a8a8a);white-space:nowrap}',
       '.dum-heat__months>span{grid-row:1;overflow:visible}',
       '.dum-heat__legend{display:flex;align-items:center;justify-content:flex-end;gap:5px;margin-top:8px;',
       'font-size:11px;color:var(--dum-tertiary,#8a8a8a)}',
-      '.dum-heat__swatch{width:11px;height:11px;border-radius:2px}',
+      '.dum-heat__swatch{width:11px;height:11px;border-radius:3px}',
       '.dum-heat__tip{position:absolute;z-index:2;transform:translate(-50%,-100%);pointer-events:none;',
       'background:var(--dsw-static-neutral-bluish-1000,#0f1115);color:#fff;',
       'border-radius:8px;padding:6px 10px;font-size:12px;line-height:17px;white-space:pre;',
@@ -810,12 +813,14 @@ window.__ModuleLoader__.load({
     }
 
     function heatmapTooltip(t, cell, heatmap, mode, metric) {
-      const value = heatmap.values.get(cell.index) ?? 0
-      const valueText = metric === 'cost' ? formatCny(value) : t('units.tokens', { value: formatCompact(value) })
       if (mode === 'weekly' || mode === 'cumulative') {
+        const value = heatmap.bars?.get(cell.week)?.value ?? 0
+        const valueText = metric === 'cost' ? formatCny(value) : t('units.tokens', { value: formatCompact(value) })
         const date = formatFullDate(heatmap.weekStarts[cell.week])
         return t(mode === 'weekly' ? 'activity.tipWeekly' : 'activity.tipCumulative', { date, value: valueText })
       }
+      const value = heatmap.values.get(cell.index) ?? 0
+      const valueText = metric === 'cost' ? formatCny(value) : t('units.tokens', { value: formatCompact(value) })
       return t('activity.tipDaily', { date: formatDayKey(cell.entry.date), value: valueText })
     }
 
@@ -1111,6 +1116,28 @@ window.__ModuleLoader__.load({
       const tipLeft = hover === null
         ? 0
         : Math.min(Math.max(hover.x * STEP + CELL / 2, 64), Math.max(gridWidth - 64, 64))
+      const barCells = []
+      if (barMode) {
+        // Weekly / cumulative: every week owns a full 7-row column from the
+        // Monday it starts, so a fresh week immediately shows a bar whose
+        // height is that week's value rather than growing one cell per day.
+        for (let week = 0; week < heatmap.weeks; week += 1) {
+          const height = heatmap.bars?.get(week)?.height ?? 0
+          for (let row = 0; row < 7; row += 1) {
+            const filled = row >= 7 - height
+            barCells.push(h('div', {
+              key: `bar-${week}-${row}`,
+              className: `dum-heat__cell ${filled ? 'dum-heat__bar' : 'dum-heat__l0'}`,
+              style: { gridColumn: week + 1, gridRow: row + 1 },
+              onMouseEnter: () => setHover({
+                x: week,
+                y: row,
+                text: heatmapTooltip(t, { week }, heatmap, mode, metric),
+              }),
+            }))
+          }
+        }
+      }
       return h(
         'div',
         { className: 'dum-heat', onMouseLeave: () => setHover(null) },
@@ -1123,29 +1150,10 @@ window.__ModuleLoader__.load({
               className: 'dum-heat__grid',
               style: {
                 gridTemplateColumns: `repeat(${heatmap.weeks}, ${CELL}px)`,
-                gridTemplateRows: `repeat(7, ${CELL}px)`,
+                gridTemplateRows: `repeat(7, ${CELL_HEIGHT}px)`,
               },
             },
-            heatmap.cells.map((cell) => {
-              if (barMode) {
-                // Weekly / cumulative are bar charts made of cells: the column
-                // is filled from the bottom up to the value's height. Every cell
-                // of the column answers the hover, so a week without usage still
-                // reports its zero value instead of staying silent.
-                const bar = heatmap.bars?.get(cell.week)
-                const height = bar?.height ?? 0
-                const filled = cell.row >= 7 - height
-                return h('div', {
-                  key: cell.entry.date,
-                  className: `dum-heat__cell ${filled ? 'dum-heat__bar' : 'dum-heat__l0'}`,
-                  style: { gridColumn: cell.week + 1, gridRow: cell.row + 1 },
-                  onMouseEnter: () => setHover({
-                    x: cell.week,
-                    y: cell.row,
-                    text: heatmapTooltip(t, cell, heatmap, mode, metric),
-                  }),
-                })
-              }
+            barMode ? barCells : heatmap.cells.map((cell) => {
               const value = heatmap.values.get(cell.index) ?? 0
               const level = heatLevel(value, heatmap.max)
               return h('div', {
@@ -1164,7 +1172,7 @@ window.__ModuleLoader__.load({
             'div',
             {
               className: 'dum-heat__tip',
-              style: { left: tipLeft, top: hover.y * STEP - 3 },
+              style: { left: tipLeft, top: hover.y * ROW_STEP - 3 },
             },
             hover.text,
           ),

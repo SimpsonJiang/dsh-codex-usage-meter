@@ -599,10 +599,11 @@ const weeklyButton = findAll(pageTree, (element) => element.type === 'button' &&
 assert.notEqual(weeklyButton, undefined)
 weeklyButton.props.onClick()
 pageTree = render(React.createElement(pageComponent, { t: zh }))
-assert.equal(heatCellsOf(pageTree).length, 371)
+assert.equal(heatCellsOf(pageTree).length, heatmapWeeks * 7, 'every week owns a full seven-row column')
 let bars = columnBars(pageTree)
 assert.equal(bars.length, heatmapWeeks, 'one column per week')
 for (const bar of bars) {
+  assert.equal(bar.rows.length, 7, 'weekly columns are complete even for the current week')
   assert.equal(bar.suffix, true, 'weekly bars are contiguous from the bottom row')
   assert.equal(bar.height <= 7, true)
 }

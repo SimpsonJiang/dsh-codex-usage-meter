@@ -1116,6 +1116,57 @@ export function foldSessionChatMeta(events, inherited) {
   }
 }
 
+/**
+ * Fold the main model calls of one session inside a local-day window.
+ * Used to repair a day whose persisted aggregate missed events (for example,
+ * calls settled while the plugin was being hot-reloaded).
+ */
+export function foldDayTotals(events, inherited, config, dayStart, dayEnd) {
+  const bucket = emptyTotals()
+  let route = { provider: '', model: '' }
+  const slots = new Map()
+  const list = Array.isArray(events) ? [...events] : []
+  list.sort((left, right) => (finiteNumber(left?.seq) ?? 0) - (finiteNumber(right?.seq) ?? 0))
+  for (const event of list) {
+    if (!isRecord(event) || typeof event.type !== 'string') continue
+    if ((finiteNumber(event?.seq) ?? 0) < inherited) continue
+    if (event.type === 'request/header' || event.type === 'request/context') {
+      const next = routeOfEvent(event)
+      if (next !== undefined) route = next
+      continue
+    }
+    if (event.type === 'llm/retry-started') {
+      const key = slotKey('', integerOf(event.data?.turn), integerOf(event.data?.step), event.seq)
+      slots.delete(key)
+      continue
+    }
+    if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') continue
+    const time = finiteNumber(event.time)
+    if (time === undefined || time < dayStart || time >= dayEnd) continue
+    const rawUsage = usageOfEvent(event)
+    if (rawUsage === undefined) continue
+    const usage = readUsage(rawUsage)
+    if (usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens <= 0) continue
+    const key = slotKey('', integerOf(event.data?.turn), integerOf(event.data?.step), event.seq)
+    const previous = slots.get(key)
+    if (previous !== undefined) addToBucket(bucket, previous, -1)
+    const source = event.type === 'assistant/message' ? sourceOfMessage(event) : route
+    const contribution = makeContribution({ usage, provider: source.provider, model: source.model, time, config })
+    slots.set(key, contribution)
+    addToBucket(bucket, contribution, 1)
+  }
+  return sanitizeTotals(bucket)
+}
+
+function mergeBucket(target, source) {
+  if (!isRecord(target) || !isRecord(source)) return
+  for (const field of BUCKET_FIELDS) {
+    const value = finiteNumber(source[field])
+    if (value === undefined) continue
+    target[field] = (finiteNumber(target[field]) ?? 0) + value
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
@@ -2141,6 +2192,74 @@ export function apply(ctx, rawConfig) {
       state.updatedAt = Date.now()
       markDirty()
     }
+
+    /**
+     * Recompute the last two local days from session logs when the persisted
+     * aggregate is short. A hot reload can leave a gap: events that settled
+     * while no `session/event` listener existed never reached the state, and
+     * later events move the session watermark past them. The logs are the
+     * billing source of truth, so rebuilding those day buckets repairs it.
+     */
+    const repairRecentDays = async () => {
+      const dayStarts = []
+      let cursor = startOfLocalDay(Date.now())
+      for (let index = 0; index < 2; index += 1) {
+        dayStarts.push(cursor)
+        cursor = startOfLocalDay(cursor - 1)
+      }
+      const windowStart = dayStarts[dayStarts.length - 1]
+      let records
+      try {
+        records = await listSessions()
+      } catch {
+        return
+      }
+      const dayBuckets = new Map(dayStarts.map((start) => [start, emptyTotals()]))
+      for (const record of Array.isArray(records) ? records : []) {
+        const id = String(record?.header?.id ?? '')
+        if (id === '') continue
+        const created = finiteNumber(record?.header?.createdAt) ?? 0
+        const stored = isRecord(state.sessions[id]) ? state.sessions[id] : undefined
+        const last = finiteNumber(stored?.lastTime) ?? 0
+        if (created < windowStart && last < windowStart) continue
+        let snapshot
+        try {
+          snapshot = await readSessionLog(record)
+        } catch {
+          continue
+        }
+        if (snapshot === undefined) continue
+        const inherited = Math.max(0, integerOf(snapshot.inheritedEventCount) ?? 0)
+        for (const start of dayStarts) {
+          const bucket = foldDayTotals(snapshot.events, inherited, config, start, start + DAY_MS)
+          if (bucket.requests <= 0 && totalTokensOf(bucket) <= 0) continue
+          mergeBucket(dayBuckets.get(start), bucket)
+        }
+      }
+      let repaired = 0
+      for (const start of dayStarts) {
+        const logged = dayBuckets.get(start)
+        if (!isRecord(logged) || totalTokensOf(logged) <= 0) continue
+        const key = localDateKey(start)
+        const stored = isRecord(state.days[key]) ? sanitizeTotals(state.days[key]) : emptyTotals()
+        const missing = totalTokensOf(logged) - totalTokensOf(stored)
+        if (missing <= Math.max(1_000, totalTokensOf(logged) * 0.001)) continue
+        state.days[key] = sanitizeTotals(logged)
+        for (const field of BUCKET_FIELDS) {
+          state.total[field] = Math.max(0,
+            (finiteNumber(state.total[field]) ?? 0)
+            + (finiteNumber(logged[field]) ?? 0)
+            - (finiteNumber(stored[field]) ?? 0))
+        }
+        repaired += 1
+      }
+      if (repaired > 0) {
+        state.revision += 1
+        state.updatedAt = Date.now()
+        markDirty()
+        console.warn(`[dsh-usage-meter] repaired ${repaired} recent day(s) from session logs`)
+      }
+    }
     void (async () => {
       try {
         dataDir = resolvePluginDataDir(ctx)
@@ -2177,6 +2296,7 @@ export function apply(ctx, rawConfig) {
         // routes never wait on session-log reads.
         void ensureTitles()
         void ensureChatMeta()
+        void repairRecentDays()
       }
     })()
     return () => {
@@ -2368,6 +2488,7 @@ export const __internals = {
   costOf,
   createState,
   foldSessionChatMeta,
+  foldDayTotals,
   foldSessionTotals,
   foldTurnCosts,
   isPeak,
